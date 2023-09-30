@@ -1,4 +1,3 @@
-from torch.optim import Adam
 import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
@@ -7,68 +6,62 @@ import vector_quantize_pytorch
 import datasets
 from torch.utils.data import DataLoader
 import torchvision.transforms.v2 as transforms
+import os
 
-from autoencoder import Encoder, Decoder
+from autoencoder import Encoder, Decoder, VQAutoencoder
+import matplotlib.pyplot as plt
 
+IMAGEDIR="out/"
 
-def calculate_perplexity(codes, codebook_size, null_index=-1):
-    """
-    Perplexity is 2^(H(p)) where H(p) is the entropy over the codebook likelyhood
-
-    the null index is assumed to be -1, perplexity is only calculated over the
-    non null codes
-    """
-    dtype, device = codes.dtype, codes.device
-    codes = codes.flatten()
-    codes = codes[codes!= null_index]
-    src = torch.ones_like(codes)
-    counts = torch.zeros(codebook_size).to(dtype).to(device)
-    counts = counts.scatter_add_(0, codes, src)
-
-    probs = counts / codes.numel()
-    # Entropy H(x) when p(x)=0 is defined as 0
-    logits = torch.log2(probs)
-    logits[probs == 0.0] = 0.0
-    entropy = -torch.sum(probs * logits)
-    return 2**entropy
+os.makedirs(IMAGEDIR, exist_ok=True)
 
 
-def train(vq_model:nn.Module, encoder:nn.Module, decoder:nn.Module, train_ds, codebook_size:int, batch_size:int = 32, alpha: float = 1e-2, learning_rate=1e-8, epochs: int = 1, image_channels: int = 3, device='cuda'):
-    dataloader = DataLoader(train_ds, batch_size=batch_size, )
-    optimizer = Adam([*vq_model.parameters(), *encoder.parameters(), *decoder.parameters()], lr=learning_rate)
+
+def log_images(vq_autoencoder, x, n:int=10, filename:str = f"{IMAGEDIR}/reconstructed.png"):
+    with torch.no_grad():
+        out = vq_autoencoder(x)
+    f, axarr = plt.subplots(n,2)
+    unnormalize_f = unnormalize()
+    for i in range(n):
+        im = x[i].clamp(0, 1).cpu()
+        im_hat = out['x_hat'][i].clamp(0,1).cpu()
+        axarr[i,0].imshow(im.permute(1,2,0))
+        axarr[i,1].imshow(im_hat.permute(1,2,0))
+    plt.show()
+    plt.savefig(filename)
+
+        
+
+def train(vq_autoencoder: VQAutoencoder, train_ds, batch_size:int = 256, alpha: float = 1e-5, learning_rate=5e-3, epochs: int = 10, device='cuda'):
+    dataloader = DataLoader(train_ds, batch_size=batch_size, drop_last=True,)
+    optimizer = torch.optim.AdamW(vq_autoencoder.parameters(), lr=learning_rate)
 
     for epoch in range(epochs):
         for batch in tqdm(dataloader):
             optimizer.zero_grad()
             x = batch['pixel_values']
 
-            x_fft = torch.fft.fft2(batch['pixel_values'])
-            # concats in channel dimension
-            x_fft = torch.concat([x_fft.real, x_fft.imag], dim=1)
-
             with torch.autocast(device):
-                z = encoder(x_fft)
-                z, codes, commit_loss = vq_model(z)
+                out = vq_autoencoder(x)
 
-                perplexity = calculate_perplexity(codes, codebook_size)
+            commit_loss = out['commit_loss'] * alpha
 
-                x_hat_fft = decoder(z)
-
-                # splits into real,imag
-                x_hat_fft = torch.complex(*torch.chunk(x_hat_fft, chunks=2, dim=1))
-
-                x_hat = torch.fft.ifft2(x_hat_fft).real
-
-                rec_loss = F.mse_loss(x, x_hat)
-
-                loss = rec_loss + alpha * commit_loss
+            loss = out['rec_loss'] + commit_loss
 
             loss.backward()
             optimizer.step()
 
-            print(f"epoch: {epoch} loss: {loss.item():.3f} rec_loss: {rec_loss.item():.2f} commit_loss: {commit_loss.item():.2f} perpelxity: {perplexity.item():.2f}")
+            log_images(vq_autoencoder, x)
 
-    return vq_model, encoder, decoder
+            print(f"epoch: {epoch} loss: {loss.item():.3f} rec_loss: {out['rec_loss'].item():.2f} commit_loss: {commit_loss.item():.2f} perpelxity: {out['perplexity'].item():.2f}")
+
+    return vq_autoencoder
+
+
+def unnormalize():
+    return transforms.Compose([ transforms.Normalize(( 0., 0., 0. ),(1/0.26862954,1/0.26130258,1/0.27577711)),
+                                transforms.Normalize((0.48145466,0.4578275,0.40821073) ,( 1., 1., 1. )),
+                               ])
 
 def load_and_transform_dataset(dataset_name_or_url: str, split:str, image_channels: int = 3, height:int=128, width:int=128, device='cuda'):
     ds = datasets.load_dataset(dataset_name_or_url, split=split)
@@ -81,7 +74,7 @@ def load_and_transform_dataset(dataset_name_or_url: str, split:str, image_channe
     ds = ds.map(f, remove_columns=['image'], batched=True).with_format('torch', device=device)
     pixel_features = datasets.Array3D(shape=(image_channels, height, width), dtype='float32')
     ds.features['pixel_values'] = pixel_features
-    ds = ds
+    ds = ds.shuffle()
     return ds
 
 
@@ -90,20 +83,22 @@ def main(image_dataset_path_or_url="imagenet-1k", device='cuda'):
     ds_test = load_and_transform_dataset(image_dataset_path_or_url, split='test', device=device)
     dtype = torch.float16
 
-    codebook_sizes = [2**i for i in range(2, 16, 2)]
+    codebook_sizes = [2**i for i in range(5, 14, 2)]
 
-    autoencoder_depth = 3
-    autoencoder_channel_mult = 4
     image_channels = 3
     input_channels = image_channels * 2 # 3 real number channels, 3 imaginary number channels
 
-    for codebook_size in codebook_sizes:
-        encoder = Encoder(autoencoder_depth, input_channels, autoencoder_channel_mult).to(device)
-        decoder = Decoder(autoencoder_depth, input_channels, autoencoder_channel_mult).to(device)
-        vq_model = vector_quantize_pytorch.VectorQuantize(autoencoder_channel_mult ** (autoencoder_depth+1), codebook_size, channel_last=False, accept_image_fmap=True, kmeans_init=True).to(device)
+    def get_vq_autoencoder():
+        encoder = Encoder(input_channels).to(device)
+        decoder = Decoder(input_channels).to(device)
+        vq_model = vector_quantize_pytorch.VectorQuantize(64, codebook_size=codebook_size, threshold_ema_dead_code=2, channel_last=False, accept_image_fmap=True, kmeans_init=True).to(device)
+        vq_autoencoder = VQAutoencoder(vq_model, encoder, decoder)
 
-        print("training vq model")
-        vq_model, encoder, decoder = train(vq_model, encoder, decoder, ds_train, codebook_size, device=device)
+        return vq_autoencoder
+
+    for codebook_size in codebook_sizes:
+        vq_autoencoder = get_vq_autoencoder()
+        vq_autoencoder = train(vq_autoencoder, ds_train, device=device)
 
 if __name__ == "__main__":
     import jsonargparse
