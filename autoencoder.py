@@ -86,7 +86,7 @@ class VQAutoencoderDCT(VQAutoencoder):
 
         # shrinks
         x_dct_in = x_dct[..., :self.tri_n, :self.tri_n]
-        
+
         z = self.encoder(x_dct_in)
 
         z, codes, commit_loss = self.vq_model(z)
@@ -102,7 +102,10 @@ class VQAutoencoderDCT(VQAutoencoder):
             x_hat_dct_grown = torch.zeros_like(x, requires_grad=False)
             x_hat_dct_grown[..., :self.tri_n, :self.tri_n] = x_hat_dct
 
-            x_hat = idct2(x_hat_dct_grown, norm=None)
-            x = idct2(x_dct, norm=None)
+            x_dct_compressed = torch.zeros_like(x_dct, requires_grad=False)
+            x_dct_compressed[..., :self.tri_n, :self.tri_n] = x_dct_in
+
+            x_hat = idct2(x_hat_dct_grown, 'ortho')
+            x = idct2(x_dct_compressed, 'ortho')
 
         return dict(x_hat=x_hat, perplexity= perplexity, commit_loss= commit_loss, rec_loss= rec_loss, codes= codes, z= z, x=x)

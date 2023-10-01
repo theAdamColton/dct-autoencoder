@@ -1,5 +1,3 @@
-import torch.nn as nn
-import torch.nn.functional as F
 from tqdm import tqdm
 import torch
 import vector_quantize_pytorch
@@ -9,6 +7,7 @@ import torchvision.transforms.v2 as transforms
 import os
 
 from autoencoder import Encoder, Decoder, VQAutoencoder, VQAutoencoderDCT
+from util import imshow
 
 import matplotlib.pyplot as plt
 import wandb
@@ -29,20 +28,11 @@ def log_images(vq_autoencoder, x, n:int=10, filename:str = f"{IMAGEDIR}/reconstr
 
     for i in range(n):
         im = out['x'][i]
-        im = unnormalize_f(im)
-        im = im.clamp(0, 1).cpu()
-
         im_hat = out['x_hat'][i]
-        im_hat = unnormalize_f(im_hat)
-        im_hat = im_hat.clamp(0,1).cpu()
-
         to_pil = transforms.ToPILImage()
+        imshow(im.cpu(), axarr[i,0])
+        imshow(im_hat.cpu(), axarr[i,1])
 
-        im = to_pil(im)
-        im_hat = to_pil(im_hat)
-
-        axarr[i,0].imshow(im)
-        axarr[i,1].imshow(im_hat)
     plt.savefig(IMAGEDIR + "/" + filename)
 
     im=  Image.frombytes('RGB',fig.canvas.get_width_height(),fig.canvas.tostring_rgb())
@@ -51,7 +41,7 @@ def log_images(vq_autoencoder, x, n:int=10, filename:str = f"{IMAGEDIR}/reconstr
 
         
 
-def train(vq_autoencoder: VQAutoencoder, train_ds, batch_size:int = 1024, alpha: float = 1e-1, learning_rate=6e-4, epochs: int = 1, device='cuda', dtype=torch.float16, log_every = 5, log_info:dict = {}, max_steps=100):
+def train(vq_autoencoder: VQAutoencoder, train_ds, batch_size:int = 32, alpha: float = 1e-1, learning_rate=6e-4, epochs: int = 1, device='cuda', dtype=torch.float16, log_every = 5, log_info:dict = {}, max_steps=100):
     run = wandb.init(project="vq-experiemnts", config=dict(batch_size=batch_size, alpha=alpha, learning_rate=learning_rate, is_dct = isinstance(vq_autoencoder, VQAutoencoderDCT)))
 
     optimizer = torch.optim.Adam(vq_autoencoder.parameters(), lr=learning_rate,)
@@ -114,7 +104,7 @@ def load_and_transform_dataset(dataset_name_or_url: str, split:str, image_channe
     return ds
 
 
-def main(image_dataset_path_or_url="imagenet-1k", device='cuda'):
+def main(image_dataset_path_or_url="imagenet-1k", device='cuda', batch_size:int=32):
     ds_train = load_and_transform_dataset(image_dataset_path_or_url, split='train')
     ds_test = load_and_transform_dataset(image_dataset_path_or_url, split='test')
     dtype = torch.float16
@@ -137,7 +127,7 @@ def main(image_dataset_path_or_url="imagenet-1k", device='cuda'):
     for codebook_size in codebook_sizes:
         for use_dct in [True, False]:
             vq_autoencoder = get_vq_autoencoder(use_dct, codebook_size)
-            vq_autoencoder = train(vq_autoencoder, ds_train, device=device, dtype=dtype, log_info={codebook_size: codebook_size, use_dct: use_dct})
+            vq_autoencoder = train(vq_autoencoder, ds_train, device=device, dtype=dtype, log_info={codebook_size: codebook_size, use_dct: use_dct}, batch_size=batch_size)
 
             vq_autoencoder = None
 
