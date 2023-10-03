@@ -1,6 +1,95 @@
+from typing import Optional
 import torch
 import matplotlib.pyplot as plt
 from torch_dct import dct_2d, idct_2d
+
+def get_square_dct_basis(resolution:int=16):
+    """
+    gets a square dct basis
+
+    returns a (resolution, resolution, resolution, resolution) basis
+
+    where the first two dimensions are the x,y dct coords
+    """
+    x, y = torch.meshgrid(torch.arange(resolution), torch.arange(resolution))
+    u, v = torch.meshgrid(torch.arange(resolution), torch.arange(resolution))
+    u = u.unsqueeze(-1).unsqueeze(-1)
+    v = v.unsqueeze(-1).unsqueeze(-1)
+    dct_basis_images = torch.cos(((2 * x + 1) * u * torch.pi) / (2 * resolution)) * \
+                       torch.cos(((2 * y + 1) * v * torch.pi) / (2 * resolution))
+    return dct_basis_images
+
+def zigzag(h:int, w:int):
+    """
+    returns zigzag indices
+    """
+    out = torch.empty((w,h), dtype=torch.long)
+
+    row, col = 0, 0
+
+    current_value = 0
+
+    for _ in range(h*w):
+        out[row, col] = current_value
+        current_value += 1
+
+        # goes /    on odd diagonals and  ^ on evens
+        #     v                          /
+
+        up_right = (row+col)%2 == 0
+
+        if up_right:
+            # if can't go up right
+            # because the col is at the edge
+            if col == w-1:
+                row += 1
+            elif row == 0:
+                col += 1
+            else:
+                row -= 1
+                col += 1
+        else:
+            if row == h-1:
+                col+=1
+            elif col == 0:
+                row += 1
+            else:
+                row += 1
+                col -= 1
+
+    return out
+
+def flatten_zigzag(x: torch.Tensor, zigzag_indices: Optional[torch.Tensor]=None):
+    """
+    you should specify the zigzag_indices if you can because it will save processing on
+    repeated calls:
+      zigzag_indices = zigzag(h,w)
+
+    x can have any number of leading dimensions
+
+    returns x flattened in zigzag order
+    """
+    h,w = x.shape[-2], x.shape[-1]
+    leading_dimensions = x.shape[:-2]
+
+    if zigzag_indices is None:
+        zigzag_indices = zigzag(h,w).to(x.device)
+
+    x = x.reshape(*leading_dimensions, h*w)
+    zigzag_indices = zigzag_indices.flatten().repeat(*leading_dimensions, 1)
+
+    return torch.gather(x, -1, zigzag_indices)
+
+def unflatten_zigzag(x: torch.Tensor, h:int, w:int, zigzag_indices: Optional[torch.Tensor]=None):
+    """
+    inverse of flatten_zigzag
+    """
+    leading_dimensions = x.shape[:-1]
+
+    if zigzag_indices is None:
+        zigzag_indices = zigzag(h,w).to(x.device)
+
+    return torch.zeros_like(x).scatter(-1, zigzag_indices.flatten().repeat(*leading_dimensions,1), x).reshape(*leading_dimensions, h, w)
 
 def dct2(x, norm=None):
     return dct_2d(x, norm)
@@ -39,10 +128,20 @@ def imshow(x:torch.Tensor, ax=None):
     if x.dtype != torch.bool:
         x = x - x.quantile(0.1)
         x = x / x.quantile(0.9)
+        x = x.clamp(0.0, 1.0)
+
     if ax is None:
-        plt.imshow(x)
+        ax = plt
+        ax.imshow(x)
         plt.show()
     else:
+        ax.axis('off')
+        ax.tick_params(
+                axis='both',
+                which='both',      # both major and minor ticks are affected
+                bottom=False,      # ticks along the bottom edge are off
+                top=False,         # ticks along the top edge are off
+                labelbottom=False)
         ax.imshow(x)
 
 def is_triangular_number(x:int):
