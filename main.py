@@ -134,12 +134,17 @@ def main(image_dataset_path_or_url="imagenet-1k", device='cuda', batch_size:int=
 
     for codebook_size in codebook_sizes:
         for heads in head_numbers:
-            for use_dct in [False,True]:
+            for use_dct in [True, False]:
                 vq_autoencoder = get_vq_autoencoder(use_dct, codebook_size, heads)
 
                 run_d = dict(use_dct = use_dct, codebook_size=codebook_size, heads=heads, bits=vq_codes * heads * math.log2(codebook_size))
 
                 print('starting run: ', run_d)
+
+                #with torch.no_grad():
+                #    with torch.autocast(device):
+                #        vq_autoencoder(torch.randn(batch_size, 3, 128, 128).to(device).to(dtype))
+                #continue
 
                 run = wandb.init(project="vq-experiments", config=run_d)
 

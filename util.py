@@ -22,6 +22,10 @@ def get_square_dct_basis(resolution:int=16):
 def zigzag(h:int, w:int):
     """
     returns zigzag indices
+
+    see: 
+        Zigzag ordering of JPEG image components
+        https://en.wikipedia.org/wiki/JPEG#JPEG_codec_example
     """
     out = torch.empty((w,h), dtype=torch.long)
 
@@ -78,7 +82,8 @@ def flatten_zigzag(x: torch.Tensor, zigzag_indices: Optional[torch.Tensor]=None)
     x = x.reshape(*leading_dimensions, h*w)
     zigzag_indices = zigzag_indices.flatten().repeat(*leading_dimensions, 1)
 
-    return torch.gather(x, -1, zigzag_indices)
+    return torch.zeros_like(x).scatter(-1, zigzag_indices, x)
+
 
 def unflatten_zigzag(x: torch.Tensor, h:int, w:int, zigzag_indices: Optional[torch.Tensor]=None):
     """
@@ -89,7 +94,9 @@ def unflatten_zigzag(x: torch.Tensor, h:int, w:int, zigzag_indices: Optional[tor
     if zigzag_indices is None:
         zigzag_indices = zigzag(h,w).to(x.device)
 
-    return torch.zeros_like(x).scatter(-1, zigzag_indices.flatten().repeat(*leading_dimensions,1), x).reshape(*leading_dimensions, h, w)
+
+    return torch.gather(x, -1, zigzag_indices.flatten().repeat(*leading_dimensions, 1)).reshape(*leading_dimensions, h,w)
+
 
 def dct2(x, norm=None):
     return dct_2d(x, norm)

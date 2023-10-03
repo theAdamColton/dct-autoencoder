@@ -132,38 +132,52 @@ class DCTAutoencoderTransformer(nn.Module):
 
 
 class VQAutoencoderDCT(nn.Module):
-    def __init__(self, image_channels: int, vq_model, dct_res:int = 32, vq_channels:int=32, vq_codes: int = 256):
+    def __init__(self, image_channels: int, vq_model, dct_features:int = 32**2, vq_channels:int=32, vq_codes: int = 256):
         super().__init__()
-        self.dct_res = dct_res
+        self.dct_features = dct_features
         self.vq_model = vq_model
         self.vq_model.accept_image_fmap = False
         self.vq_model.channel_last = True
         self.vq_channels = vq_channels
         self.vq_codes = vq_codes
         self.image_channels = image_channels
+
         #self.transformer = DCTAutoencoderTransformer(image_channels, dct_res, dct_res**2 // 16)
 
         # input is unnormalized features
         self.encoder = nn.Sequential(
-                nn.LayerNorm(dct_res**2 * image_channels),
-                nn.Linear(dct_res**2 * image_channels, vq_codes * vq_channels),
+                nn.LayerNorm(self.dct_features * image_channels),
+                nn.Linear(self.dct_features * image_channels, vq_codes * vq_channels),
                 nn.GELU(),
                 )
         self.decoder = nn.Sequential(
                 nn.LayerNorm(vq_codes * vq_channels),
-                nn.Linear(vq_codes * vq_channels, dct_res**2 * image_channels),
+                nn.Linear(vq_codes * vq_channels, self.dct_features * image_channels),
         )
 
     def forward(self, x):
+        b, c, h, w = x.shape
+
+        assert c == self.image_channels
+
         with torch.no_grad():
             # x: pixel values
             x_dct = dct2(x, 'ortho')
 
-            # shrinks
-            x_dct_in = x_dct[..., :self.dct_res, :self.dct_res]
+            # flattens in a zigzag pattern
+            # shape b, c, self.dct_res^2
+            if not hasattr(self, 'zigzag_i'):
+                self.zigzag_i = zigzag(h, w).to(x.device)
 
-        b = x_dct_in.shape[0]
-        z = self.encoder(x_dct_in.reshape(b, -1))
+            # takes self.dct_features count of lowest freq dct components
+            x_dct_compressed_flat = flatten_zigzag(x_dct, self.zigzag_i)
+            x_dct_compressed_flat[:,:,self.dct_features:] = 0.0
+            # shape b,c,h,w
+            x_dct_compressed = unflatten_zigzag(x_dct_compressed_flat, h, w, self.zigzag_i)
+            # shape b,c,self.dct_features
+            x_dct_compressed_flat = x_dct_compressed_flat[:,:,:self.dct_features]
+
+        z = self.encoder(x_dct_compressed_flat.reshape(b, -1))
         z = z.reshape(b, self.vq_codes, self.vq_channels)
 
         z, codes, commit_loss = self.vq_model(z)
@@ -173,17 +187,21 @@ class VQAutoencoderDCT(nn.Module):
 
         z = z.reshape(b, -1)
 
-        x_hat_dct = self.decoder(z).reshape(b, self.image_channels, self.dct_res, self.dct_res)
+        # shape b, self.dct_features * image_channels
+        x_hat_dct = self.decoder(z)
+        x_hat_dct = x_hat_dct.reshape(b, self.image_channels, self.dct_features)
 
-        rec_loss = F.mse_loss(x_hat_dct, x_dct_in)
+        # mse loss over dct features, which are both arranged in zigzag indexing
+        rec_loss = F.mse_loss(x_hat_dct, x_dct_compressed_flat)
 
-        # grows
+        # inverse dct
         with torch.no_grad():
-            x_hat_dct_grown = torch.zeros_like(x, requires_grad=False)
-            x_hat_dct_grown[..., :self.dct_res, :self.dct_res] = x_hat_dct
-
-            x_dct_compressed = torch.zeros_like(x_dct, requires_grad=False)
-            x_dct_compressed[..., :self.dct_res, :self.dct_res] = x_dct_in
+            # grows to total dct features
+            x_hat_dct_grown = torch.zeros_like(x_dct_compressed, requires_grad=False).reshape(b,c,h*w)
+            # shape b,c,h*w
+            x_hat_dct_grown[..., :self.dct_features] = x_hat_dct
+            # shape b,c,h,w
+            x_hat_dct_grown = unflatten_zigzag(x_hat_dct_grown, h,w,self.zigzag_i)
 
             x_hat = idct2(x_hat_dct_grown, 'ortho')
             x_compressed = idct2(x_dct_compressed, 'ortho')
