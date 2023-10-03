@@ -20,7 +20,7 @@ os.makedirs(IMAGEDIR, exist_ok=True)
 
 
 
-def log_images(vq_autoencoder, x, n:int=10, filename:str = f"{IMAGEDIR}/reconstructed.png"):
+def log_images(vq_autoencoder, x,filename:str, n:int=10):
     with torch.no_grad():
         out = vq_autoencoder(x[:n])
     fig, axarr = plt.subplots(n,2)
@@ -40,6 +40,7 @@ def log_images(vq_autoencoder, x, n:int=10, filename:str = f"{IMAGEDIR}/reconstr
 
 
 def validate(vq_autoencoder, val_ds, batch_size: int=32, device='cuda', dtype=torch.float16):
+    vq_autoencoder.eval()
     dataloader = DataLoader(val_ds, batch_size=batch_size, num_workers=8)
     for i, batch in enumerate(tqdm(dataloader)):
         x = batch['pixel_values']
@@ -47,7 +48,11 @@ def validate(vq_autoencoder, val_ds, batch_size: int=32, device='cuda', dtype=to
         with torch.no_grad():
             with torch.autocast(device):
                 out = vq_autoencoder(x)
-        wandb.log({'val':dict(step=i, loss=out['loss'].item(), rec_loss=out['rec_loss'].item(), commit_loss=out['commit_loss'].item(), perplexity=out['perplexity'].item(), pixel_loss=out['pixel_loss'].item())})
+        wandb.log({'val':dict(step=i, rec_loss=out['rec_loss'].item(), commit_loss=out['commit_loss'].item(), perplexity=out['perplexity'].item(), pixel_loss=out['pixel_loss'].item())})
+
+        if i==0:
+            image = log_images(vq_autoencoder, x, filename="validation.jpg")
+            wandb.log({"val":dict(image=wandb.Image(image))})
         
 
 def train(vq_autoencoder, train_ds, batch_size:int = 32, alpha: float = 5e-1, learning_rate=6e-4, epochs: int = 1, device='cuda', dtype=torch.float16, log_every = 20, log_info:dict = {}, max_steps=1000):
@@ -81,7 +86,7 @@ def train(vq_autoencoder, train_ds, batch_size:int = 32, alpha: float = 5e-1, le
 
             if i % log_every == 0:
                 image = log_images(vq_autoencoder, x, filename=str(log_info))
-                wandb.log(dict(epoch=epoch, step=i, image=wandb.Image(image)))
+                wandb.log({"train":dict(epoch=epoch, step=i, image=wandb.Image(image))})
 
             if n_steps > max_steps:
                 return vq_autoencoder
@@ -97,11 +102,11 @@ def unnormalize():
                                 transforms.Normalize((-0.48145466,-0.4578275,-0.40821073) ,( 1., 1., 1. )),
                                ])
 
-def load_and_transform_dataset(dataset_name_or_url: str, split:str, image_channels: int = 3, height:int=128, width:int=128):
+def load_and_transform_dataset(dataset_name_or_url: str, split:str, image_channels: int = 3, height:int=128, width:int=128, rand:bool=True):
     ds = datasets.load_dataset(dataset_name_or_url, split=split)
     def f(examples):
         # norm parameters taken from clip
-        _transforms = transforms.Compose([transforms.RandomResizedCrop((height, width)), transforms.ToImageTensor(), transforms.ConvertImageDtype(torch.float32), transforms.Normalize((0.48145466,0.4578275,0.40821073), (0.26862954,0.26130258,0.27577711))])
+        _transforms = transforms.Compose([transforms.RandomResizedCrop((height, width)) if rand else transforms.CenterCrop((height,width)), transforms.ToImageTensor(), transforms.ConvertImageDtype(torch.float32), transforms.Normalize((0.48145466,0.4578275,0.40821073), (0.26862954,0.26130258,0.27577711))])
         return {'pixel_values':[_transforms(image.convert("RGB")) for image in examples["image"]]}
 
     ds.set_transform(f)
@@ -112,8 +117,8 @@ def load_and_transform_dataset(dataset_name_or_url: str, split:str, image_channe
 
 
 def main(image_dataset_path_or_url="imagenet-1k", device='cuda', batch_size:int=32):
-    ds_train = load_and_transform_dataset(image_dataset_path_or_url, split='train')
-    ds_test = load_and_transform_dataset(image_dataset_path_or_url, split='test')
+    ds_train = load_and_transform_dataset(image_dataset_path_or_url, split='train', rand=True)
+    ds_test = load_and_transform_dataset(image_dataset_path_or_url, split='test', rand=False)
     dtype = torch.float16
 
     image_channels = 3
@@ -134,7 +139,7 @@ def main(image_dataset_path_or_url="imagenet-1k", device='cuda', batch_size:int=
 
     for codebook_size in codebook_sizes:
         for heads in head_numbers:
-            for use_dct in [True, False]:
+            for use_dct in [False, True]:
                 vq_autoencoder = get_vq_autoencoder(use_dct, codebook_size, heads)
 
                 run_d = dict(use_dct = use_dct, codebook_size=codebook_size, heads=heads, bits=vq_codes * heads * math.log2(codebook_size))
