@@ -2,7 +2,9 @@ import torch.nn.functional as F
 import torch
 import torch.nn as nn
 
-from util import calculate_perplexity, dct2, idct2, flatten_zigzag, unflatten_zigzag, zigzag
+import x_transformers
+
+from util import calculate_perplexity, dct2, idct2, flatten_zigzag, unflatten_zigzag, zigzag, ZigzagFlattener
 
 
 class Encoder(nn.Module):
@@ -65,7 +67,8 @@ class VQAutoencoder(nn.Module):
     def __init__(self, image_channels: int, vq_model, vq_channels:int, vq_codes:int):
         super().__init__()
 
-        assert vq_codes == 256
+        if not vq_codes == 256:
+            print("warning, internal vq_codes used (256) is not the specified vq_codes")
 
         self.vq_model = vq_model
         self.encoder = Encoder(image_channels, vq_channels)
@@ -86,49 +89,129 @@ class VQAutoencoder(nn.Module):
         return dict(x_hat=x_hat, perplexity= perplexity, commit_loss= commit_loss, rec_loss= rec_loss, codes= codes, z= z, x=x, pixel_loss=rec_loss)
 
 class DCTAutoencoderTransformer(nn.Module):
-    def __init__(self, image_channels: int, input_res: int, patch_size: int, n_layers:int= 2):
+    def __init__(self, image_channels: int, feature_channels:int, dct_features: int, patch_size: int, vq_model, h:int, w:int, n_layers_encoder:int=8, n_layers_decoder:int=8, heads: int = 2, highfreq_first:bool=False):
         """
         input_res: the square integer input resolution size.
         """
         super().__init__()
-        self.n_patches = int(input_res**2 // patch_size)
+        self.n_patches = int(dct_features // patch_size)
 
-        assert input_res**2 / patch_size == input_res**2 // patch_size
+        assert dct_features / patch_size == dct_features // patch_size
 
+        self.dct_features = dct_features
         self.image_channels = image_channels
         self.patch_size = patch_size
-        self.pos_embed = nn.Embedding(self.n_patches, patch_size * image_channels)
-        self.zigzag_i = nn.Parameter(zigzag(input_res, input_res), requires_grad=False)
+        self.feature_channels = feature_channels
 
-        self.encoder = nn.TransformerEncoder(
-                nn.TransformerEncoderLayer(patch_size * image_channels, 8, patch_size * 4, batch_first=True, norm_first=True),
-                n_layers,
-            )
+        self.proj_in = nn.Sequential(
+                nn.Linear(image_channels * patch_size,
+                          feature_channels),
+                nn.GELU(),
+                nn.LayerNorm(feature_channels),
+                                     )
+        self.vq_norm_in = nn.Sequential(
+                #nn.GELU(),
+                nn.LayerNorm(feature_channels),
+        )
 
-        self.decoder =  nn.TransformerEncoder(
-                nn.TransformerEncoderLayer(patch_size * image_channels, 8, patch_size * 4, batch_first=True, norm_first=True),
-                n_layers,
-            )
+        self.proj_out = nn.Sequential(
+                nn.GELU(),
+                nn.LayerNorm(feature_channels),
+                nn.Linear(feature_channels,
+                          image_channels * patch_size)
+                )
+
+        self.dct_norm = nn.LayerNorm([self.image_channels, self.dct_features])
+
+        self.encoder = x_transformers.Encoder(dim=feature_channels, depth=n_layers_encoder, heads=heads, attn_flash = True, ff_glu = True, rotary_pos_emb=True)
+
+        self.decoder =  x_transformers.Encoder(dim=feature_channels, depth=n_layers_decoder, heads=heads, attn_flash = True, ff_glu = True, rotary_pos_emb=True)
+
+        self.highfreq_first = highfreq_first
+        self.zigzag_flattener = ZigzagFlattener(h, w)
+
+        self.vq_model = vq_model
+        self.vq_model.accept_image_fmap = False
+        self.vq_model.channel_last = True
 
     def patchify(self, x):
-        return flatten_zigzag(x, zigzag_indices=self.zigzag_i)
+        b,c,h,w = x.shape
+        # shape b,c,h*w
+        x= self.zigzag_flattener.flatten(x)
+        x=x[...,:self.dct_features]
+        x = self.dct_norm(x)
+        # puts high freqs first
+        # TODO reverse zigzag somehow instead of flip which does a copy
+        if self.highfreq_first:
+            x = torch.flip(x, [-1])
+        x = x.reshape(b, self.n_patches, self.patch_size * self.image_channels)
+        return x
 
     def depatchify(self, x, h, w):
-        return unflatten_zigzag(x, h, w, zigzag_indices=self.zigzag_i)
+        b,s,z = x.shape
+        x = x.reshape(b,self.image_channels, -1)
 
-    def encode(self, x):
-        b = x.shape[0]
+        # denormalizes
+        x = F.layer_norm(x, self.dct_norm.normalized_shape, 1 / self.dct_norm.weight, - self.dct_norm.bias, self.dct_norm.eps)
+
+        # TODO reverse zigzag somehow instead of flip
+        if self.highfreq_first:
+            x = torch.flip(x, [-1])
+
+        x_expanded = torch.zeros(b,self.image_channels,h*w, dtype=x.dtype, device=x.device)
+        x_expanded[..., :x.shape[-1]] = x
+        x = x_expanded
+        x_expanded = None
+
+        x=self.zigzag_flattener.unflatten(x)
+        x = x.reshape(b, self.image_channels, h, w)
+        return x
+
+    def encode_dct(self, x):
+        b,c,h,w = x.shape
+        assert c == self.image_channels
+
+        # shape b, s, z
         x = self.patchify(x)
-        x = x.reshape(b, self.n_patches, self.patch_size * self.image_channels)
-        x = x + self.pos_embed.weight
+        #x = x + self.pos_embed.weight
         x = self.encoder(x)
         return x
 
-    def decode(self, x, h, w):
+    def decode_dct(self, x, h, w):
         x = self.decoder(x)
-        b = x.shape[0]
-        x = x.reshape(b, self.image_channels, self.n_patches * self.patch_size)
-        return unflatten_zigzag(x, h, w)
+        x = self.depatchify(x, h, w)
+        return x
+
+    def forward(self, x: torch.Tensor):
+        b, c, h, w = x.shape
+
+        with torch.no_grad():
+            # x: pixel values
+            in_feat = self.patchify(dct2(x, 'ortho'))
+
+        z = self.proj_in(in_feat)
+
+        z = self.encoder(z)
+        z = self.vq_norm_in(z)
+
+        z, codes, commit_loss = self.vq_model(z)
+
+
+        with torch.no_grad():
+            perplexity = calculate_perplexity(codes, self.vq_model.codebook_size)
+
+        z = self.decoder(z)
+        z = self.proj_out(z)
+
+
+        rec_loss = F.mse_loss(in_feat, z)
+
+        with torch.no_grad():
+            x_hat = self.depatchify(z, h, w)
+            x_hat = idct2(x_hat, 'ortho')
+            pixel_loss = F.mse_loss(x,x_hat)
+
+        return dict(x_hat=x_hat, perplexity= perplexity, commit_loss= commit_loss, rec_loss= rec_loss, codes= codes, z= z, x=x, pixel_loss=pixel_loss)
 
 
 class VQAutoencoderDCT(nn.Module):

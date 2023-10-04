@@ -4,10 +4,11 @@ import vector_quantize_pytorch
 import datasets
 from torch.utils.data import DataLoader
 import torchvision.transforms.v2 as transforms
+import torchvision
 import os
 import math
 
-from autoencoder import VQAutoencoder, VQAutoencoderDCT
+from autoencoder import VQAutoencoder, VQAutoencoderDCT, DCTAutoencoderTransformer
 from util import imshow
 
 import matplotlib.pyplot as plt
@@ -19,23 +20,31 @@ IMAGEDIR="out/"
 os.makedirs(IMAGEDIR, exist_ok=True)
 
 
-
 def log_images(vq_autoencoder, x,filename:str, n:int=10):
     with torch.no_grad():
         out = vq_autoencoder(x[:n])
-    fig, axarr = plt.subplots(n,2)
+#    fig, axarr = plt.subplots(n,2)
+#
+#
+#    for i in range(n):
+#        im = out['x'][i]
+#        im_hat = out['x_hat'][i]
+#        imshow(im.cpu(), axarr[i,0])
+#        imshow(im_hat.cpu(), axarr[i,1])
+#
+#    plt.savefig(IMAGEDIR + "/" + filename)
 
+    ims = []
 
     for i in range(n):
         im = out['x'][i]
         im_hat = out['x_hat'][i]
-        imshow(im.cpu(), axarr[i,0])
-        imshow(im_hat.cpu(), axarr[i,1])
+        ims.append(im)
+        ims.append(im_hat)
 
-    plt.savefig(IMAGEDIR + "/" + filename)
+    im = torchvision.utils.make_grid(ims, 2, normalize=True, scale_each=True)
+    im = transforms.functional.to_pil_image(im.cpu().to(torch.float32))
 
-    im=  Image.frombytes('RGB',fig.canvas.get_width_height(),fig.canvas.tostring_rgb())
-    plt.close()
     return im
 
 
@@ -55,16 +64,20 @@ def validate(vq_autoencoder, val_ds, batch_size: int=32, device='cuda', dtype=to
             wandb.log({"val":dict(image=wandb.Image(image))})
         
 
-def train(vq_autoencoder, train_ds, batch_size:int = 32, alpha: float = 5e-1, learning_rate=6e-4, epochs: int = 1, device='cuda', dtype=torch.float16, log_every = 20, log_info:dict = {}, max_steps=1000):
+def train(vq_autoencoder, train_ds, batch_size:int = 32, alpha: float = 1e-1, pixel_loss_coeff:float=1e1, learning_rate=7e-4, epochs: int = 1, device='cuda', dtype=torch.float16, log_every = 20, log_info:dict = {}, max_steps=1e20, warmup_steps = 30):
 
-    optimizer = torch.optim.Adam(vq_autoencoder.parameters(), lr=learning_rate,)
+    optimizer = torch.optim.Adam(vq_autoencoder.parameters(), lr=1e-9)
 
     n_steps = 0
 
-    for epoch in range(epochs):
+    for epoch_i, epoch in enumerate(range(epochs)):
         train_ds = train_ds.shuffle()
         dataloader = DataLoader(train_ds, batch_size=batch_size, drop_last=True, num_workers=8)
         for i, batch in enumerate(tqdm(dataloader)):
+            if epoch_i == 0 and i < warmup_steps:
+                for g in optimizer.param_groups:
+                    g['lr'] = ((i+1) / warmup_steps) * learning_rate
+
             optimizer.zero_grad()
             x = batch['pixel_values']
             x = x.to(device)
@@ -74,7 +87,7 @@ def train(vq_autoencoder, train_ds, batch_size:int = 32, alpha: float = 5e-1, le
 
             commit_loss = out['commit_loss'] * alpha
 
-            loss = out['rec_loss'] + commit_loss
+            loss = out['rec_loss'] + commit_loss + pixel_loss_coeff * out['pixel_loss']
 
             loss.backward()
             optimizer.step()
@@ -93,7 +106,6 @@ def train(vq_autoencoder, train_ds, batch_size:int = 32, alpha: float = 5e-1, le
 
             n_steps += 1
 
-    wandb.finish()
     return vq_autoencoder
 
 
@@ -116,33 +128,41 @@ def load_and_transform_dataset(dataset_name_or_url: str, split:str, image_channe
     return ds
 
 
-def main(image_dataset_path_or_url="imagenet-1k", device='cuda', batch_size:int=32):
-    ds_train = load_and_transform_dataset(image_dataset_path_or_url, split='train', rand=True)
-    ds_test = load_and_transform_dataset(image_dataset_path_or_url, split='test', rand=False)
-    dtype = torch.float16
+def main(image_dataset_path_or_url="imagenet-1k", device='cuda', batch_size:int=32, width:int=128, height:int=128):
 
     image_channels = 3
     input_channels = image_channels
-    vq_channels = 64
     vq_codes = 256
+    feature_channels = 256
+    patch_size = 64
 
-    def get_vq_autoencoder(use_dct, codebook_size, heads):
-        vq_model = vector_quantize_pytorch.VectorQuantize(vq_channels, codebook_size=codebook_size, codebook_dim=16, threshold_ema_dead_code=1, heads=heads, channel_last=False, accept_image_fmap=True, kmeans_init=True, separate_codebook_per_head=False, sample_codebook_temp=1.0).to(device)
+    ds_train = load_and_transform_dataset(image_dataset_path_or_url, split='train', rand=True, height=height, width=width)
+    ds_test = load_and_transform_dataset(image_dataset_path_or_url, split='test', rand=False, height=height, width=width)
+    dtype = torch.float16
 
-        if use_dct:
-            return VQAutoencoderDCT(input_channels, vq_model, vq_channels=vq_channels, vq_codes=vq_codes).to(device)
-        return VQAutoencoder(input_channels, vq_model, vq_channels=vq_channels, vq_codes=vq_codes).to(device)
 
-    codebook_sizes = [2**i for i in range(5, 11, 2)]
+    def get_vq_autoencoder(model, codebook_size, heads):
+        vq_model = vector_quantize_pytorch.VectorQuantize(feature_channels, codebook_size=codebook_size, codebook_dim=32, threshold_ema_dead_code=128, heads=heads, channel_last=False, accept_image_fmap=True, kmeans_init=True, separate_codebook_per_head=False, sample_codebook_temp=1.0, decay=0.90).to(device)
 
-    head_numbers = [1, 4, 8]
+        if model == 'dct_tr':
+            n_patches = vq_codes // heads
+            tr_dct_feat_size = n_patches * patch_size
+            return DCTAutoencoderTransformer(input_channels, feature_channels, tr_dct_feat_size, patch_size, vq_model, height, width).to(device)
+        elif model == 'dct_mlp':
+            return VQAutoencoderDCT(input_channels, vq_model, vq_channels=feature_channels, vq_codes=vq_codes).to(device)
+        else:
+            return VQAutoencoder(input_channels, vq_model, vq_channels=feature_channels, vq_codes=vq_codes).to(device)
+
+    codebook_sizes = [32]
+
+    head_numbers = [8]
 
     for codebook_size in codebook_sizes:
         for heads in head_numbers:
-            for use_dct in [False, True]:
-                vq_autoencoder = get_vq_autoencoder(use_dct, codebook_size, heads)
+            for model in ['dct_tr']:#, 'dct_mlp', 'pix_cnn']:
+                vq_autoencoder = get_vq_autoencoder(model, codebook_size, heads)
 
-                run_d = dict(use_dct = use_dct, codebook_size=codebook_size, heads=heads, bits=vq_codes * heads * math.log2(codebook_size))
+                run_d = dict(model = model, codebook_size=codebook_size, heads=heads, bits=vq_codes * heads * math.log2(codebook_size), vq_codes=vq_codes, feature_dim=feature_channels, patch_size=patch_size)
 
                 print('starting run: ', run_d)
 

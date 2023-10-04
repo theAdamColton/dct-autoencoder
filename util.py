@@ -1,5 +1,6 @@
 from typing import Optional
 import torch
+from torch import nn
 import matplotlib.pyplot as plt
 from torch_dct import dct_2d, idct_2d
 
@@ -96,6 +97,27 @@ def unflatten_zigzag(x: torch.Tensor, h:int, w:int, zigzag_indices: Optional[tor
 
 
     return torch.gather(x, -1, zigzag_indices.flatten().repeat(*leading_dimensions, 1)).reshape(*leading_dimensions, h,w)
+
+
+
+class ZigzagFlattener(nn.Module):
+    def __init__(self, h:int, w:int):
+        super().__init__()
+        self.zigzag = nn.Parameter(zigzag(h,w), requires_grad=False)
+        self.h=h
+        self.w=w
+
+    def flatten(self, x:torch.Tensor):
+        h,w = x.shape[-2:]
+        assert h == self.h
+        assert w == self.w
+        x = flatten_zigzag(x, self.zigzag)
+        return x
+
+    def unflatten(self, x:torch.Tensor):
+        x = unflatten_zigzag(x, self.h,self.w,self.zigzag)
+        return x
+
 
 
 def dct2(x, norm=None):
