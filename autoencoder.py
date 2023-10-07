@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 
 import x_transformers
+#from vit_pytorch.na_vit import NaViT
 
 from util import calculate_perplexity, dct2, idct2, flatten_zigzag, unflatten_zigzag, zigzag, ZigzagFlattener
 
@@ -89,7 +90,7 @@ class VQAutoencoder(nn.Module):
         return dict(x_hat=x_hat, perplexity= perplexity, commit_loss= commit_loss, rec_loss= rec_loss, codes= codes, z= z, x=x, pixel_loss=rec_loss)
 
 class DCTAutoencoderTransformer(nn.Module):
-    def __init__(self, image_channels: int, feature_channels:int, dct_features: int, patch_size: int, vq_model, h:int, w:int, n_layers_encoder:int=8, n_layers_decoder:int=8, heads: int = 2, highfreq_first:bool=False):
+    def __init__(self, image_channels: int, feature_channels:int, dct_features: int, patch_size: int, vq_model, h:int, w:int, n_layers_encoder:int=4, n_layers_decoder:int=4, heads: int = 4, highfreq_first:bool=False):
         """
         input_res: the square integer input resolution size.
         """
@@ -110,7 +111,6 @@ class DCTAutoencoderTransformer(nn.Module):
                 nn.LayerNorm(feature_channels),
                                      )
         self.vq_norm_in = nn.Sequential(
-                #nn.GELU(),
                 nn.LayerNorm(feature_channels),
         )
 
@@ -121,7 +121,7 @@ class DCTAutoencoderTransformer(nn.Module):
                           image_channels * patch_size)
                 )
 
-        self.dct_norm = nn.LayerNorm([self.image_channels, self.dct_features])
+        self.dct_norm = nn.LayerNorm(self.dct_features)
 
         self.encoder = x_transformers.Encoder(dim=feature_channels, depth=n_layers_encoder, heads=heads, attn_flash = True, ff_glu = True, rotary_pos_emb=True)
 
@@ -134,68 +134,26 @@ class DCTAutoencoderTransformer(nn.Module):
         self.vq_model.accept_image_fmap = False
         self.vq_model.channel_last = True
 
-    def patchify(self, x):
-        b,c,h,w = x.shape
-        # shape b,c,h*w
-        x= self.zigzag_flattener.flatten(x)
-        x=x[...,:self.dct_features]
-        x = self.dct_norm(x)
-        # puts high freqs first
-        # TODO reverse zigzag somehow instead of flip which does a copy
-        if self.highfreq_first:
-            x = torch.flip(x, [-1])
-        x = x.reshape(b, self.n_patches, self.patch_size * self.image_channels)
-        return x
-
-    def depatchify(self, x, h, w):
-        b,s,z = x.shape
-        x = x.reshape(b,self.image_channels, -1)
-
-        # denormalizes
-        x = F.layer_norm(x, self.dct_norm.normalized_shape, 1 / self.dct_norm.weight, - self.dct_norm.bias, self.dct_norm.eps)
-
-        # TODO reverse zigzag somehow instead of flip
-        if self.highfreq_first:
-            x = torch.flip(x, [-1])
-
-        x_expanded = torch.zeros(b,self.image_channels,h*w, dtype=x.dtype, device=x.device)
-        x_expanded[..., :x.shape[-1]] = x
-        x = x_expanded
-        x_expanded = None
-
-        x=self.zigzag_flattener.unflatten(x)
-        x = x.reshape(b, self.image_channels, h, w)
-        return x
-
-    def encode_dct(self, x):
-        b,c,h,w = x.shape
-        assert c == self.image_channels
-
-        # shape b, s, z
-        x = self.patchify(x)
-        #x = x + self.pos_embed.weight
-        x = self.encoder(x)
-        return x
-
-    def decode_dct(self, x, h, w):
-        x = self.decoder(x)
-        x = self.depatchify(x, h, w)
-        return x
-
     def forward(self, x: torch.Tensor):
         b, c, h, w = x.shape
 
         with torch.no_grad():
-            # x: pixel values
-            in_feat = self.patchify(dct2(x, 'ortho'))
+            x_dct = dct2(x, 'ortho')
 
-        z = self.proj_in(in_feat)
+            # shape b,c,h*w
+            x_dct = self.zigzag_flattener.flatten(x_dct)
+            x_dct=x_dct[...,:self.dct_features]
+
+        in_feature = self.dct_norm(x_dct)
+
+        z = self.proj_in(
+                in_feature.reshape(b, self.n_patches, self.patch_size * self.image_channels)
+                )
 
         z = self.encoder(z)
         z = self.vq_norm_in(z)
 
         z, codes, commit_loss = self.vq_model(z)
-
 
         with torch.no_grad():
             perplexity = calculate_perplexity(codes, self.vq_model.codebook_size)
@@ -203,13 +161,18 @@ class DCTAutoencoderTransformer(nn.Module):
         z = self.decoder(z)
         z = self.proj_out(z)
 
+        # de-patchifies
+        z = z.reshape(b,self.image_channels, -1)
 
-        rec_loss = F.mse_loss(in_feat, z)
+        rec_loss = F.mse_loss(x_dct, z)
 
-        with torch.no_grad():
-            x_hat = self.depatchify(z, h, w)
-            x_hat = idct2(x_hat, 'ortho')
-            pixel_loss = F.mse_loss(x,x_hat)
+        z_expanded = torch.zeros(b,self.image_channels,h*w, dtype=z.dtype, device=z.device)
+        z_expanded[..., :z.shape[-1]] = z
+        z = z_expanded
+        z_expanded = None
+        z=self.zigzag_flattener.unflatten(z)
+        x_hat = idct2(z, 'ortho')
+        pixel_loss = F.mse_loss(x,z)
 
         return dict(x_hat=x_hat, perplexity= perplexity, commit_loss= commit_loss, rec_loss= rec_loss, codes= codes, z= z, x=x, pixel_loss=pixel_loss)
 
@@ -278,17 +241,16 @@ class VQAutoencoderDCT(nn.Module):
         rec_loss = F.mse_loss(x_hat_dct, x_dct_compressed_flat)
 
         # inverse dct
-        with torch.no_grad():
-            # grows to total dct features
-            x_hat_dct_grown = torch.zeros_like(x_dct_compressed, requires_grad=False).reshape(b,c,h*w)
-            # shape b,c,h*w
-            x_hat_dct_grown[..., :self.dct_features] = x_hat_dct
-            # shape b,c,h,w
-            x_hat_dct_grown = unflatten_zigzag(x_hat_dct_grown, h,w,self.zigzag_i)
+        # grows to total dct features
+        x_hat_dct_grown = torch.zeros_like(x_dct_compressed, requires_grad=False).reshape(b,c,h*w)
+        # shape b,c,h*w
+        x_hat_dct_grown[..., :self.dct_features] = x_hat_dct
+        # shape b,c,h,w
+        x_hat_dct_grown = unflatten_zigzag(x_hat_dct_grown, h,w,self.zigzag_i)
 
-            x_hat = idct2(x_hat_dct_grown, 'ortho')
-            x_compressed = idct2(x_dct_compressed, 'ortho')
+        x_hat = idct2(x_hat_dct_grown, 'ortho')
+        x_compressed = idct2(x_dct_compressed, 'ortho')
 
-            pixel_loss = F.mse_loss(x,x_hat)
+        pixel_loss = F.mse_loss(x,x_hat)
 
         return dict(x_hat=x_hat, perplexity= perplexity, commit_loss= commit_loss, rec_loss= rec_loss, codes= codes, z= z, x=x_compressed, pixel_loss=pixel_loss)

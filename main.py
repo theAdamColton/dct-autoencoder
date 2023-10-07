@@ -64,14 +64,14 @@ def validate(vq_autoencoder, val_ds, batch_size: int=32, device='cuda', dtype=to
             wandb.log({"val":dict(image=wandb.Image(image))})
         
 
-def train(vq_autoencoder, train_ds, batch_size:int = 32, alpha: float = 1e-1, pixel_loss_coeff:float=1e1, learning_rate=7e-4, epochs: int = 1, device='cuda', dtype=torch.float16, log_every = 20, log_info:dict = {}, max_steps=1e20, warmup_steps = 30):
+def train(vq_autoencoder, train_ds, batch_size:int = 32, alpha: float = 1e-3, pixel_loss_coeff:float=1.0, learning_rate=1e-3, epochs: int = 1, device='cuda', dtype=torch.float16, log_every = 20, log_info:dict = {}, max_steps=1e20, warmup_steps = 100):
 
     optimizer = torch.optim.Adam(vq_autoencoder.parameters(), lr=1e-9)
 
     n_steps = 0
 
     for epoch_i, epoch in enumerate(range(epochs)):
-        train_ds = train_ds.shuffle()
+        train_ds = train_ds.shuffle(seed=epoch_i + 42)
         dataloader = DataLoader(train_ds, batch_size=batch_size, drop_last=True, num_workers=8)
         for i, batch in enumerate(tqdm(dataloader)):
             if epoch_i == 0 and i < warmup_steps:
@@ -132,9 +132,9 @@ def main(image_dataset_path_or_url="imagenet-1k", device='cuda', batch_size:int=
 
     image_channels = 3
     input_channels = image_channels
-    vq_codes = 256
-    feature_channels = 256
-    patch_size = 64
+    vq_codes = 64
+    feature_channels = 1024
+    patch_size = 256
 
     ds_train = load_and_transform_dataset(image_dataset_path_or_url, split='train', rand=True, height=height, width=width)
     ds_test = load_and_transform_dataset(image_dataset_path_or_url, split='test', rand=False, height=height, width=width)
@@ -142,20 +142,20 @@ def main(image_dataset_path_or_url="imagenet-1k", device='cuda', batch_size:int=
 
 
     def get_vq_autoencoder(model, codebook_size, heads):
-        vq_model = vector_quantize_pytorch.VectorQuantize(feature_channels, codebook_size=codebook_size, codebook_dim=32, threshold_ema_dead_code=128, heads=heads, channel_last=False, accept_image_fmap=True, kmeans_init=True, separate_codebook_per_head=False, sample_codebook_temp=1.0, decay=0.90).to(device)
+        vq_model = vector_quantize_pytorch.VectorQuantize(feature_channels, codebook_size=codebook_size, codebook_dim=64, threshold_ema_dead_code=10, heads=heads, channel_last=False, accept_image_fmap=True, kmeans_init=True, separate_codebook_per_head=False, sample_codebook_temp=1.0, decay=0.90).to(device)
 
         if model == 'dct_tr':
-            n_patches = vq_codes // heads
-            tr_dct_feat_size = n_patches * patch_size
+            tr_dct_feat_size = patch_size * vq_codes
+
             return DCTAutoencoderTransformer(input_channels, feature_channels, tr_dct_feat_size, patch_size, vq_model, height, width).to(device)
         elif model == 'dct_mlp':
-            return VQAutoencoderDCT(input_channels, vq_model, vq_channels=feature_channels, vq_codes=vq_codes).to(device)
+            return VQAutoencoderDCT(input_channels, vq_model, dct_features=feature_channels, vq_channels=feature_channels, vq_codes=vq_codes).to(device)
         else:
             return VQAutoencoder(input_channels, vq_model, vq_channels=feature_channels, vq_codes=vq_codes).to(device)
 
-    codebook_sizes = [32]
+    codebook_sizes = [256]
 
-    head_numbers = [8]
+    head_numbers = [4]
 
     for codebook_size in codebook_sizes:
         for heads in head_numbers:
