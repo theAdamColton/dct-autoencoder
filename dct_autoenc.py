@@ -5,7 +5,7 @@ import torch.nn as nn
 from einops import rearrange, reduce
 import torchvision.transforms.v2 as transforms
 
-from na_vit import NaViT
+from na_vit import NaViT, FeedForward
 
 from util import (
     StreamingMeanStd2D,
@@ -20,10 +20,9 @@ class DCTAutoencoderTransformer(nn.Module):
         self,
         vq_model,
         image_channels: int=3,
-        depth:int =6,
-        feature_channels: int=768,
+        depth:int =8,
+        feature_channels: int=1024,
         patch_size: int=32,
-        # only take 75 of the dct features and pass to the encoder
         dct_compression_factor: float = 0.80,
         max_n_patches: int = 512,
     ):
@@ -38,14 +37,15 @@ class DCTAutoencoderTransformer(nn.Module):
         self.feature_channels = feature_channels
         self.dct_compression_factor = dct_compression_factor
         self.max_n_patches = max_n_patches
+        mlp_dim = 2048
 
         self.vq_norm_in = nn.Sequential(
             nn.LayerNorm(feature_channels),
         )
 
         self.proj_out = nn.Sequential(
-            #nn.GELU(),
-            #nn.LayerNorm(feature_channels),
+            FeedForward(feature_channels, mlp_dim),
+            nn.LayerNorm(feature_channels),
             nn.Linear(feature_channels, image_channels * patch_size ** 2),
         )
 
@@ -56,7 +56,7 @@ class DCTAutoencoderTransformer(nn.Module):
             depth=depth,
             heads=4,
             channels=image_channels,
-            mlp_dim=1024,
+            mlp_dim=mlp_dim,
             dropout=0.1,
             emb_dropout=0.1,
             token_dropout_prob=None,  # token dropout of 10% (keep 90% of tokens)
@@ -71,7 +71,7 @@ class DCTAutoencoderTransformer(nn.Module):
         self.max_res = max_res
         self.dct_stats = StreamingMeanStd2D(self.max_res, self.max_res)
 
-        self.dct_std_eps = 1e-3
+        self.dct_std_eps = 1e-2
 
 
     def dct_norm(self, x:List[torch.Tensor]):
@@ -213,7 +213,7 @@ class DCTAutoencoderTransformer(nn.Module):
         patches = encoder_out['patches']
         mask = ~mask
 
-        z = self.vq_norm_in(z)
+        #z = self.vq_norm_in(z)
 
         # TODO figure out how to make the mask work
         # with the vq model
@@ -282,11 +282,12 @@ class DCTAutoencoderTransformer(nn.Module):
                 # FFT doesn't support cuda for non powers of two
                 x_image = idct2(x_dct_image.detach().float().cpu(), "ortho")
                 z_image = idct2(z_dct_image.detach().float().cpu(), "ortho")
-                pixel_loss = F.mse_loss(x_image, z_image)
+                pixel_loss = pixel_loss + F.mse_loss(x_image, z_image)
 
                 x_hat.append(z_image)
                 x_images.append(x_image)
 
+        pixel_loss = pixel_loss / len(x_hat)
 
         return dict(
             x_hat=x_hat,
