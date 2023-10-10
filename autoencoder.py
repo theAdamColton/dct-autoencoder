@@ -1,256 +1,275 @@
+from typing import List, Tuple
 import torch.nn.functional as F
 import torch
 import torch.nn as nn
+from einops import rearrange, reduce
+import torchvision.transforms.v2 as transforms
 
-import x_transformers
-#from vit_pytorch.na_vit import NaViT
+from na_vit import NaViT
 
-from util import calculate_perplexity, dct2, idct2, flatten_zigzag, unflatten_zigzag, zigzag, ZigzagFlattener
-
-
-class Encoder(nn.Module):
-    def __init__(self, image_channels: int = 3, vq_channels: int = 64):
-        super().__init__()
-        self.image_channels = image_channels
-        self.layers = nn.Sequential(
-                nn.Conv2d(image_channels, 16, kernel_size=3, stride=1, padding=1),
-                nn.MaxPool2d(kernel_size=2, stride=2),
-                nn.GELU(),
-
-                nn.BatchNorm2d(16),
-                nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),
-                nn.MaxPool2d(kernel_size=2, stride=2),
-                nn.GELU(),
-
-                nn.BatchNorm2d(32),
-                nn.Conv2d(32, 32, kernel_size=3, stride=1, padding=1),
-                nn.MaxPool2d(kernel_size=2, stride=2),
-                nn.GELU(),
-
-                nn.BatchNorm2d(32),
-                nn.Conv2d(32, vq_channels, kernel_size=3, stride=1, padding=1),
-                nn.MaxPool2d(kernel_size=2, stride=2),
-                )
-
-    def forward(self, x):
-        return self.layers(x)
-
-
-class Decoder(nn.Module):
-    def __init__(self, image_channels: int=3, vq_channels:int=64):
-        super().__init__()
-
-        self.layers = nn.Sequential(
-                nn.Upsample(scale_factor=2, mode="bilinear"),
-                nn.Conv2d(vq_channels, 32, kernel_size=3, stride=1, padding=1),
-                nn.GELU(),
-
-                nn.BatchNorm2d(32),
-                nn.Upsample(scale_factor=2, mode="bilinear"),
-                nn.Conv2d(32, 32, kernel_size=3, stride=1, padding=1),
-                nn.GELU(),
-
-                nn.BatchNorm2d(32),
-                nn.Upsample(scale_factor=2, mode="bilinear"),
-                nn.Conv2d(32, 16, kernel_size=3, stride=1, padding=1),
-                nn.GELU(),
-
-                nn.BatchNorm2d(16),
-                nn.Upsample(scale_factor=2, mode="bilinear"),
-                nn.Conv2d(16, image_channels, kernel_size=3, stride=1, padding=1),
-                )
-
-    def forward(self, x):
-        return self.layers(x)
-
-
-class VQAutoencoder(nn.Module):
-    def __init__(self, image_channels: int, vq_model, vq_channels:int, vq_codes:int):
-        super().__init__()
-
-        if not vq_codes == 256:
-            print("warning, internal vq_codes used (256) is not the specified vq_codes")
-
-        self.vq_model = vq_model
-        self.encoder = Encoder(image_channels, vq_channels)
-        self.decoder = Decoder(image_channels, vq_channels)
-
-    def forward(self, x):
-        # x: pixel values
-        
-        z = self.encoder(x)
-        z, codes, commit_loss = self.vq_model(z)
-
-        perplexity = calculate_perplexity(codes, self.vq_model.codebook_size)
-
-        x_hat = self.decoder(z)
-
-        rec_loss = F.mse_loss(x, x_hat)
-
-        return dict(x_hat=x_hat, perplexity= perplexity, commit_loss= commit_loss, rec_loss= rec_loss, codes= codes, z= z, x=x, pixel_loss=rec_loss)
+from util import (
+    calculate_perplexity,
+    dct2,
+    idct2,
+    ema_update_2d,
+)
 
 class DCTAutoencoderTransformer(nn.Module):
-    def __init__(self, image_channels: int, feature_channels:int, dct_features: int, patch_size: int, vq_model, h:int, w:int, n_layers_encoder:int=4, n_layers_decoder:int=4, heads: int = 4, highfreq_first:bool=False):
+    def __init__(
+        self,
+        vq_model,
+        image_channels: int=3,
+        depth:int =8,
+        feature_channels: int=768,
+        patch_size: int=16,
+        # only take 75 of the dct features and pass to the encoder
+        dct_compression_factor: float = 0.75,
+        max_n_patches: int = 16,
+    ):
         """
         input_res: the square integer input resolution size.
         """
         super().__init__()
-        self.n_patches = int(dct_features // patch_size)
 
-        assert dct_features / patch_size == dct_features // patch_size
 
-        self.dct_features = dct_features
         self.image_channels = image_channels
         self.patch_size = patch_size
         self.feature_channels = feature_channels
+        self.dct_compression_factor = dct_compression_factor
+        self.max_n_patches = max_n_patches
 
-        self.proj_in = nn.Sequential(
-                nn.Linear(image_channels * patch_size,
-                          feature_channels),
-                nn.GELU(),
-                nn.LayerNorm(feature_channels),
-                                     )
         self.vq_norm_in = nn.Sequential(
-                nn.LayerNorm(feature_channels),
+            nn.LayerNorm(feature_channels),
         )
 
         self.proj_out = nn.Sequential(
-                nn.GELU(),
-                nn.LayerNorm(feature_channels),
-                nn.Linear(feature_channels,
-                          image_channels * patch_size)
-                )
-
-        self.dct_norm = nn.LayerNorm(self.dct_features)
-
-        self.encoder = x_transformers.Encoder(dim=feature_channels, depth=n_layers_encoder, heads=heads, attn_flash = True, ff_glu = True, rotary_pos_emb=True)
-
-        self.decoder =  x_transformers.Encoder(dim=feature_channels, depth=n_layers_decoder, heads=heads, attn_flash = True, ff_glu = True, rotary_pos_emb=True)
-
-        self.highfreq_first = highfreq_first
-        self.zigzag_flattener = ZigzagFlattener(h, w)
-
-        self.vq_model = vq_model
-        self.vq_model.accept_image_fmap = False
-        self.vq_model.channel_last = True
-
-    def forward(self, x: torch.Tensor):
-        b, c, h, w = x.shape
-
-        with torch.no_grad():
-            x_dct = dct2(x, 'ortho')
-
-            # shape b,c,h*w
-            x_dct = self.zigzag_flattener.flatten(x_dct)
-            x_dct=x_dct[...,:self.dct_features]
-
-        in_feature = self.dct_norm(x_dct)
-
-        z = self.proj_in(
-                in_feature.reshape(b, self.n_patches, self.patch_size * self.image_channels)
-                )
-
-        z = self.encoder(z)
-        z = self.vq_norm_in(z)
-
-        z, codes, commit_loss = self.vq_model(z)
-
-        with torch.no_grad():
-            perplexity = calculate_perplexity(codes, self.vq_model.codebook_size)
-
-        z = self.decoder(z)
-        z = self.proj_out(z)
-
-        # de-patchifies
-        z = z.reshape(b,self.image_channels, -1)
-
-        rec_loss = F.mse_loss(x_dct, z)
-
-        z_expanded = torch.zeros(b,self.image_channels,h*w, dtype=z.dtype, device=z.device)
-        z_expanded[..., :z.shape[-1]] = z
-        z = z_expanded
-        z_expanded = None
-        z=self.zigzag_flattener.unflatten(z)
-        x_hat = idct2(z, 'ortho')
-        pixel_loss = F.mse_loss(x,z)
-
-        return dict(x_hat=x_hat, perplexity= perplexity, commit_loss= commit_loss, rec_loss= rec_loss, codes= codes, z= z, x=x, pixel_loss=pixel_loss)
-
-
-class VQAutoencoderDCT(nn.Module):
-    def __init__(self, image_channels: int, vq_model, dct_features:int = 32**2, vq_channels:int=32, vq_codes: int = 256):
-        super().__init__()
-        self.dct_features = dct_features
-        self.vq_model = vq_model
-        self.vq_model.accept_image_fmap = False
-        self.vq_model.channel_last = True
-        self.vq_channels = vq_channels
-        self.vq_codes = vq_codes
-        self.image_channels = image_channels
-
-        #self.transformer = DCTAutoencoderTransformer(image_channels, dct_res, dct_res**2 // 16)
-
-        # input is unnormalized features
-        self.encoder = nn.Sequential(
-                nn.LayerNorm(self.dct_features * image_channels),
-                nn.Linear(self.dct_features * image_channels, vq_codes * vq_channels),
-                nn.GELU(),
-                )
-        self.decoder = nn.Sequential(
-                nn.LayerNorm(vq_codes * vq_channels),
-                nn.Linear(vq_codes * vq_channels, self.dct_features * image_channels),
+            #nn.GELU(),
+            #nn.LayerNorm(feature_channels),
+            nn.Linear(feature_channels, image_channels * patch_size ** 2),
         )
 
-    def forward(self, x):
-        b, c, h, w = x.shape
+        self.encoder = NaViT(
+            image_size=max_n_patches * patch_size,
+            patch_size=patch_size,
+            num_classes=feature_channels,
+            dim=feature_channels,
+            depth=depth,
+            heads=4,
+            channels=image_channels,
+            mlp_dim=2048,
+            dropout=0.1,
+            emb_dropout=0.1,
+            token_dropout_prob=None,  # token dropout of 10% (keep 90% of tokens)
+        )
 
-        assert c == self.image_channels
+        self.vq_model = vq_model
+        self.vq_model.accept_image_fmap = False
+        self.vq_model.channel_last = True
+
+        self.ema_initted = False
+        self.ema_alpha = 1e-3
+        max_res = patch_size * max_n_patches
+        self.max_res = max_res
+        self.dct_mean = nn.Parameter(torch.zeros(max_res, max_res), requires_grad=False)
+        self.dct_std = nn.Parameter(torch.ones(max_res, max_res), requires_grad=False)
+
+
+    def dct_norm(self, x:torch.Tensor, eps=1e-7):
+        return x
+        *_, h, w = x.shape
+        mean = reduce(x, '... h w -> h w', 'mean')
+        std = reduce(x, '... h w -> h w', torch.var)
+
+        if self.training:
+            if self.ema_initted:
+                ema_update_2d(self.dct_mean, mean, self.ema_alpha)
+            else:
+                ema_update_2d(self.dct_mean, mean, 1.0)
+                self.ema_initted = True
+
+        # normalizes
+        mean = self.dct_mean[:h, :w]
+        std = self.dct_std[:h, :w]
+
+        return (x - mean) / torch.clamp(std, eps)
+
+    def dct_unnorm(self, x:torch.Tensor):
+        return x
+        *_, h, w = x.shape
+        mean = self.dct_mean[:h, :w]
+        std = self.dct_std[:h, :w]
+        return (x+mean) * std
+
+    @torch.no_grad()
+    def prepare_batch(self, batch: List[torch.Tensor]):
+        """
+        batch: list of tensors containing unnormalized image pixels
+
+        returns a list of dct features tensors which are cropped to
+            the correct dimensions
+        """
+        dct_features = []
+        original_sizes = []
+
+        for x in batch:
+            # TODO take features that are closer to 0,0
+            # rather than a rectangle
+
+            c, h, w = x.shape
+            if h < self.patch_size:
+                rz = transforms.Resize((self.patch_size, int((self.patch_size / h) * w)))
+                x = rz(x)
+            elif w < self.patch_size:
+                rz = transforms.Resize((int((self.patch_size / w) * h), self.patch_size))
+                x = rz(x)
+            c, h, w = x.shape
+
+            original_sizes.append((h,w))
+
+            x_dct = dct2(x, "ortho")
+        
+            h_c, w_c = self.dct_compression_factor * h, self.dct_compression_factor * w
+
+            p_h = round(h_c / self.patch_size)
+            p_w = round(w_c / self.patch_size)
+            p_h = max(p_h, 1)
+            p_w = max(p_w, 1)
+
+            # we need that
+            # ar = p_h_c / p_w_c = p_h / p_w
+            # p_h_c * p_w_c <= self.max_n_patches
+            # ar * p_w_c <= self.max_n_patches / p_w_c
+            # ar * p_w_c ** 2 <= self.max_n_patches
+            # p_w_c = sqrt(self.max_n_patches / ar)
+            # p_h_c = ar * p_w_c
+
+            ar = p_h/p_w
+            p_w_c = int((self.max_n_patches / ar)**0.5)
+            p_h_c = int(ar * p_w_c)
+
+            assert p_h_c * p_w_c <= self.max_n_patches
+
+            p_h = min(p_h, p_h_c)
+            p_w = min(p_w, p_w_c)
+            p_h = max(p_h, 1)
+            p_w = max(p_w, 1)
+
+
+            dct_h = p_h * self.patch_size
+            dct_w = p_w * self.patch_size
+
+            assert dct_h % self.patch_size == 0
+            assert dct_w % self.patch_size == 0
+            assert dct_h <= self.max_res
+            assert dct_w <= self.max_res
+            assert dct_h >= self.patch_size
+            assert dct_w >= self.patch_size
+
+            assert h >= self.patch_size
+            assert w >= self.patch_size
+
+            x_dct = x_dct[..., :dct_h, :dct_w]
+
+            dct_features.append(x_dct)
+
+
+        return dct_features, original_sizes
+
+
+    def forward(self, pixel_values: List[torch.Tensor]=None, dct_features: List[torch.Tensor]=None, original_sizes:List[Tuple] = None, decode:bool=True):
+        """
+        x: list of tensors containing unnormalized image pixels
+        """
+
+        if dct_features is None:
+            # list of dct tensors
+            x, original_sizes = self.prepare_batch(pixel_values)
+        else:
+            x = dct_features
+
+        x = [self.dct_norm(feat) for feat in x]
+
+
+        encoder_out = self.encoder(x,
+             group_images = True,
+             group_max_seq_len = self.max_n_patches*2,
+        )
+        z = encoder_out['x']
+        mask = encoder_out['key_pad_mask']
+        revert_patching = encoder_out['revert_patching']
+        patches = encoder_out['patches']
+        mask = ~mask
+
+        z = self.vq_norm_in(z)
+
+        # TODO figure out how to make the mask work
+        # with the vq model
+        z, codes, commit_loss = self.vq_model(z, mask=mask)
 
         with torch.no_grad():
-            # x: pixel values
-            x_dct = dct2(x, 'ortho')
+            perplexity = calculate_perplexity(codes[mask], self.vq_model.codebook_size)
 
-            # flattens in a zigzag pattern
-            # shape b, c, self.dct_res^2
-            if not hasattr(self, 'zigzag_i'):
-                self.zigzag_i = zigzag(h, w).to(x.device)
+        z = self.proj_out(z)
 
-            # takes self.dct_features count of lowest freq dct components
-            x_dct_compressed_flat = flatten_zigzag(x_dct, self.zigzag_i)
-            x_dct_compressed_flat[:,:,self.dct_features:] = 0.0
-            # shape b,c,h,w
-            x_dct_compressed = unflatten_zigzag(x_dct_compressed_flat, h, w, self.zigzag_i)
-            # shape b,c,self.dct_features
-            x_dct_compressed_flat = x_dct_compressed_flat[:,:,:self.dct_features]
+        rec_loss = F.mse_loss(z[mask], patches[mask])
 
-        z = self.encoder(x_dct_compressed_flat.reshape(b, -1))
-        z = z.reshape(b, self.vq_codes, self.vq_channels)
+        if not decode:
+            return dict(
+                    perplexity=perplexity,
+                    commit_loss=commit_loss,
+                    rec_loss=rec_loss,
+                    codes=codes,
+                    z=z,
+                    x=x,
+            )
 
-        z, codes, commit_loss = self.vq_model(z)
+
+        # reverts patching, z is now a list of tensors,
+        # each tensor being an image of patches
+        z = revert_patching(z)
+
+        pixel_loss = 0.0
+
+        x_hat = []
+        x_images = []
 
         with torch.no_grad():
-            perplexity = calculate_perplexity(codes, self.vq_model.codebook_size)
+            for x_dct_image, z_dct_image, (h,w) in zip(x, z, original_sizes):
 
-        z = z.reshape(b, -1)
+                z_dct_image = rearrange(z_dct_image, 'h w (c p1 p2) -> c (h p1) (w p2)', p1=self.patch_size, p2=self.patch_size, c=self.image_channels)
 
-        # shape b, self.dct_features * image_channels
-        x_hat_dct = self.decoder(z)
-        x_hat_dct = x_hat_dct.reshape(b, self.image_channels, self.dct_features)
+                def pad(to_pad:torch.Tensor, h,w):
+                    c, ih, iw = to_pad.shape
+                    padded = torch.zeros(c,h,w, device=to_pad.device, dtype=to_pad.dtype)
+                    padded[:, :ih, :iw] = to_pad
+                    return padded
+        
 
-        # mse loss over dct features, which are both arranged in zigzag indexing
-        rec_loss = F.mse_loss(x_hat_dct, x_dct_compressed_flat)
+                # un normalize
+                x_dct_image = self.dct_unnorm(x_dct_image)
+                z_dct_image = self.dct_unnorm(z_dct_image)
 
-        # inverse dct
-        # grows to total dct features
-        x_hat_dct_grown = torch.zeros_like(x_dct_compressed, requires_grad=False).reshape(b,c,h*w)
-        # shape b,c,h*w
-        x_hat_dct_grown[..., :self.dct_features] = x_hat_dct
-        # shape b,c,h,w
-        x_hat_dct_grown = unflatten_zigzag(x_hat_dct_grown, h,w,self.zigzag_i)
 
-        x_hat = idct2(x_hat_dct_grown, 'ortho')
-        x_compressed = idct2(x_dct_compressed, 'ortho')
+                # pads back to image size
+                x_dct_image = pad(x_dct_image, h,w)
+                z_dct_image = pad(z_dct_image, h,w)
 
-        pixel_loss = F.mse_loss(x,x_hat)
+                # FFT doesn't support cuda for non powers of two
+                x_image = idct2(x_dct_image.detach().float().cpu(), "ortho")
+                z_image = idct2(z_dct_image.detach().float().cpu(), "ortho")
+                pixel_loss = F.mse_loss(x_image, z_image)
 
-        return dict(x_hat=x_hat, perplexity= perplexity, commit_loss= commit_loss, rec_loss= rec_loss, codes= codes, z= z, x=x_compressed, pixel_loss=pixel_loss)
+                x_hat.append(z_image)
+                x_images.append(x_image)
+
+
+        return dict(
+            x_hat=x_hat,
+            perplexity=perplexity,
+            commit_loss=commit_loss,
+            rec_loss=rec_loss,
+            codes=codes,
+            z=z,
+            x=x_images,
+            pixel_loss=pixel_loss,
+        )

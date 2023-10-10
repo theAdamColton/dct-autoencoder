@@ -9,3 +9,9 @@
 * test flipped vs not flipped frequency ordering
 
 * try making the encoder causal, and the decoder non-causal, what does this imply?
+
+# 10/06/23
+
+* change na\_vit so it doesn't do the query attention pooling I want a raw list of sequence length activations
+
+* fix the h,w scaling
