@@ -188,7 +188,7 @@ class Transformer(nn.Module):
         return self.norm(x)
 
 class NaViT(nn.Module):
-    def __init__(self, *, image_size, patch_size, dim, depth, heads, mlp_dim, channels = 3, dim_head = 64, dropout = 0., emb_dropout = 0., token_dropout_prob = None, ):
+    def __init__(self, *, image_size, patch_size, dim, depth, heads, mlp_dim, channels = 3, dim_head = 64, dropout = 0., emb_dropout = 0., token_dropout_prob = None, norm_in:bool = True):
         super().__init__()
         image_height, image_width = pair(image_size)
 
@@ -217,7 +217,7 @@ class NaViT(nn.Module):
         self.patch_size = patch_size
 
         self.to_patch_embedding = nn.Sequential(
-            LayerNorm(patch_dim),
+            LayerNorm(patch_dim) if norm_in else nn.Identity(),
             nn.Linear(patch_dim, dim),
             LayerNorm(dim),
         )
@@ -228,20 +228,6 @@ class NaViT(nn.Module):
         self.dropout = nn.Dropout(emb_dropout)
 
         self.transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
-
-        # final attention pooling queries
-
-        #self.attn_pool_queries = nn.Parameter(torch.randn(dim))
-        #self.attn_pool = Attention(dim = dim, dim_head = dim_head, heads = heads)
-
-        ## output to logits
-
-        #self.to_latent = nn.Identity()
-
-        #self.mlp_head = nn.Sequential(
-        #    LayerNorm(dim),
-        #    nn.Linear(dim, num_classes, bias = False)
-        #)
 
     @property
     def device(self):
@@ -329,7 +315,9 @@ class NaViT(nn.Module):
 
         # combine patched images as well as the patched width / height positions for 2d positional embedding
 
+
         patches = pad_sequence(batched_sequences)
+
         patch_positions = pad_sequence(batched_positions)
 
         # need to know how many images for final attention pooling
@@ -391,39 +379,3 @@ class NaViT(nn.Module):
                     
 
         return dict(x=x, revert_patching=revert_patching, key_pad_mask=key_pad_mask, patches=patches)
-
-
-
-#        # do attention pooling at the end
-#
-#
-#        queries = repeat(self.attn_pool_queries, 'd -> b n d', n = max_queries, b = x.shape[0])
-#
-#        # attention pool mask
-#
-#
-#        attn_pool_mask = rearrange(image_id_arange, 'i -> i 1') == rearrange(batched_image_ids, 'b j -> b 1 j')
-#
-#        attn_pool_mask = attn_pool_mask & rearrange(key_pad_mask, 'b j -> b 1 j')
-#
-#        attn_pool_mask = rearrange(attn_pool_mask, 'b i j -> b 1 i j')
-#
-#        # attention pool
-#
-#        x = self.attn_pool(queries, context = x, attn_mask = attn_pool_mask) + queries
-#
-#        x = rearrange(x, 'b n d -> (b n) d')
-#
-#
-#        # each batch element may not have same amount of images
-#
-#        is_images = image_id_arange < rearrange(num_images, 'b -> b 1')
-#        is_images = rearrange(is_images, 'b n -> (b n)')
-#
-#        x = x[is_images]
-#
-#        # project out to logits
-#
-#        x = self.to_latent(x)
-#
-#        return self.mlp_head(x)

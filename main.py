@@ -52,6 +52,23 @@ def make_image_grid(x, x_hat, filename=None, n: int = 10, max_size:int=1024):
 
     return im
 
+def get_collate(vq_autoencoder):
+    def dict_collate(x: List[dict]):
+        o = {}
+        for d in x:
+            for k,v in d.items():
+                l = o.get(k)
+                if l is not None:
+                    o[k].append(v)
+                else:
+                    o[k] = [v]
+        dct_features, original_sizes = vq_autoencoder.prepare_batch(o['pixel_values'])
+
+        o['dct_features'] = dct_features
+        o['original_sizes'] = original_sizes
+
+        return o
+    return dict_collate
 
 def validate(
     vq_autoencoder,
@@ -62,7 +79,7 @@ def validate(
     use_wandb: bool = False,
 ):
     vq_autoencoder.eval()
-    dataloader = DataLoader(val_ds, batch_size=batch_size, num_workers=8, collate_fn=None)
+    dataloader = DataLoader(val_ds, batch_size=batch_size, num_workers=0, collate_fn=get_collate(vq_autoencoder))
     for i, batch in enumerate(tqdm(dataloader)):
         x = batch["pixel_values"]
         x = x.to(device)
@@ -97,7 +114,7 @@ def train(
     epochs: int = 1,
     device="cuda",
     dtype=torch.float16,
-    log_every=10,
+    val_every=10,
     n_log:int=10,
     max_steps=1e20,
     warmup_steps=10,
@@ -107,26 +124,12 @@ def train(
 
     n_steps = 0
 
-    def dict_collate(x: List[dict]):
-        o = {}
-        for d in x:
-            for k,v in d.items():
-                l = o.get(k)
-                if l is not None:
-                    o[k].append(v)
-                else:
-                    o[k] = [v]
-        dct_features, original_sizes = vq_autoencoder.prepare_batch(o['pixel_values'])
-
-        o['dct_features'] = dct_features
-        o['original_sizes'] = original_sizes
-
-        return o
+    collate = get_collate(vq_autoencoder)
 
     for epoch_i, epoch in enumerate(range(epochs)):
         train_ds = train_ds.shuffle(seed=epoch_i + 42)
         dataloader = DataLoader(
-                train_ds, batch_size=batch_size, num_workers=0, collate_fn=dict_collate
+                train_ds, batch_size=batch_size, num_workers=0, collate_fn=collate
         )
         for i, batch in enumerate(tqdm(dataloader)):
             if epoch_i == 0 and i < warmup_steps:
@@ -167,12 +170,16 @@ def train(
                     }
                 )
 
-            if i % log_every == 0:
+            if i % val_every == 0:
+                print("logging images ....")
+                vq_autoencoder.eval()
                 with torch.no_grad():
-                    print("logging....")
-                    vq_autoencoder.eval()
-                    out = vq_autoencoder(dct_features=dct_features[:n_log], original_sizes=original_sizes[:n_log], decode=True)
-                    vq_autoencoder.train()
+                    batch = collate([train_ds[i] for i in range(n_log)])
+                    dct_features, original_sizes = batch['dct_features'], batch['original_sizes']
+                    dct_features = [x.to(device).to(dtype) for x in dct_features]
+                    with torch.autocast(device):
+                        out = vq_autoencoder(dct_features=dct_features, original_sizes=original_sizes)
+                vq_autoencoder.train()
                 image = make_image_grid(out['x'], out['x_hat'], filename=f"{OUTDIR}/train image {i:04}.png")
                 if use_wandb:
                     wandb.log(
@@ -215,11 +222,11 @@ def main(
     image_dataset_path_or_url="imagenet-1k",
     device="cuda",
     batch_size: int = 32,
+    patch_size: int = 32,
+    feature_channels:int = 768,
+    dct_compression_factor:float=0.75,
     use_wandb: bool = False,
 ):
-    feature_channels = 768
-    patch_size = 16
-    dct_compression_factor=0.75
 
     ds_train = load_and_transform_dataset(
         image_dataset_path_or_url, split="train",
@@ -251,13 +258,15 @@ def main(
             dct_compression_factor=dct_compression_factor,
         ).to(device)
 
-    codebook_sizes = [256]
+    codebook_size = 256
 
-    head_numbers = [16]
+    heads = 16
 
 
-    for codebook_size in codebook_sizes:
-        for heads in head_numbers:
+#    for codebook_size in codebook_sizes:
+#        for heads in head_numbers:
+    for learning_rate in [5e-4, 1e-3, 3e-3]:
+        for patch_size in [32, 16]:
             vq_autoencoder = get_vq_autoencoder(codebook_size, heads)
 
             run_d = dict(
@@ -266,6 +275,7 @@ def main(
                 bits=heads * math.log2(codebook_size),
                 feature_dim=feature_channels,
                 patch_size=patch_size,
+                learning_rate=learning_rate,
             )
 
             print("starting run: ", run_d)

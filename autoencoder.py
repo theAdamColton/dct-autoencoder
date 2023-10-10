@@ -8,6 +8,7 @@ import torchvision.transforms.v2 as transforms
 from na_vit import NaViT
 
 from util import (
+    StreamingMeanStd2D,
     calculate_perplexity,
     dct2,
     idct2,
@@ -19,11 +20,11 @@ class DCTAutoencoderTransformer(nn.Module):
         self,
         vq_model,
         image_channels: int=3,
-        depth:int =4,
+        depth:int =6,
         feature_channels: int=768,
         patch_size: int=32,
         # only take 75 of the dct features and pass to the encoder
-        dct_compression_factor: float = 0.75,
+        dct_compression_factor: float = 0.80,
         max_n_patches: int = 512,
     ):
         """
@@ -59,38 +60,50 @@ class DCTAutoencoderTransformer(nn.Module):
             dropout=0.1,
             emb_dropout=0.1,
             token_dropout_prob=None,  # token dropout of 10% (keep 90% of tokens)
+            norm_in=False,
         )
 
         self.vq_model = vq_model
         self.vq_model.accept_image_fmap = False
         self.vq_model.channel_last = True
 
-        self.ema_alpha = 1e-4
         max_res = patch_size * max_n_patches
         self.max_res = max_res
-        self.dct_mean = nn.Parameter(torch.zeros(max_res, max_res), requires_grad=False)
-        self.dct_std = nn.Parameter(torch.ones(max_res, max_res), requires_grad=False)
+        self.dct_stats = StreamingMeanStd2D(self.max_res, self.max_res)
+
+        self.dct_std_eps = 1e-3
 
 
-    def dct_norm(self, x:torch.Tensor, eps=1e-7):
-        *_, h, w = x.shape
-        mean = reduce(x, '... h w -> h w', 'mean')
-        std = reduce(x, '... h w -> h w', torch.var)
-
+    def dct_norm(self, x:List[torch.Tensor]):
+        # records stats of x
         if self.training:
-            ema_update_2d(self.dct_mean, mean, self.ema_alpha)
+            for im in x:
+                self.dct_stats(im)
 
         # normalizes
-        mean = self.dct_mean[:h, :w]
-        std = self.dct_std[:h, :w]
+        mean = self.dct_stats.mean
+        std = self.dct_stats.std
+        out = []
 
-        return (x - mean) / torch.clamp(std, eps)
+        while len(x) > 0:
+            image = x.pop(0)
+            _,h,w = image.shape
+            out.append((image - mean[:h, :w]) / torch.clamp(std[:h, :w], self.dct_std_eps))
 
-    def dct_unnorm(self, x:torch.Tensor):
-        *_, h, w = x.shape
-        mean = self.dct_mean[:h, :w]
-        std = self.dct_std[:h, :w]
-        return (x+mean) * std
+        return out
+
+    def dct_unnorm(self, x:List[torch.Tensor]):
+        # xnorm = (x-mean) / std
+        # x = xnorm*std + mean
+        mean = self.dct_stats.mean
+        std = self.dct_stats.std
+        
+        out = []
+        while len(x) > 0:
+            im = x.pop(0)
+            _, h, w = im.shape
+            out.append((im * torch.clamp(std[:h, :w], self.dct_std_eps) + mean[:h, :w]))
+        return out
 
     @torch.no_grad()
     def prepare_batch(self, batch: List[torch.Tensor]):
@@ -108,13 +121,19 @@ class DCTAutoencoderTransformer(nn.Module):
             # rather than a rectangle
 
             c, h, w = x.shape
+
+            assert c == self.image_channels
+
             if h < self.patch_size:
                 rz = transforms.Resize((self.patch_size, int((self.patch_size / h) * w)))
                 x = rz(x)
-            elif w < self.patch_size:
+            if w < self.patch_size:
                 rz = transforms.Resize((int((self.patch_size / w) * h), self.patch_size))
                 x = rz(x)
             c, h, w = x.shape
+
+            assert h >= self.patch_size
+            assert w >= self.patch_size
 
             original_sizes.append((h,w))
 
@@ -156,8 +175,6 @@ class DCTAutoencoderTransformer(nn.Module):
             assert dct_h >= self.patch_size
             assert dct_w >= self.patch_size
 
-            assert h >= self.patch_size
-            assert w >= self.patch_size
 
             x_dct = x_dct[..., :dct_h, :dct_w]
 
@@ -178,14 +195,19 @@ class DCTAutoencoderTransformer(nn.Module):
         else:
             x = dct_features
 
-        x = [self.dct_norm(feat) for feat in x]
+        x = self.dct_norm(x)
 
+        assert not any([torch.isnan(im).any().item() for im in x])
 
         encoder_out = self.encoder(x,
              group_images = True,
-             group_max_seq_len = self.max_n_patches*2,
+             group_max_seq_len = 2048,
         )
+
         z = encoder_out['x']
+
+        assert not torch.isnan(z).any().item()
+
         mask = encoder_out['key_pad_mask']
         revert_patching = encoder_out['revert_patching']
         patches = encoder_out['patches']
@@ -237,6 +259,9 @@ class DCTAutoencoderTransformer(nn.Module):
         x_images = []
 
         with torch.no_grad():
+            # un normalize all tensors in x and z
+            x = self.dct_unnorm(x)
+            z = self.dct_unnorm(z)
             for x_dct_image, z_dct_image, (h,w) in zip(x, z, original_sizes):
 
                 #z_dct_image = rearrange(z_dct_image, '(h w) (c p1 p2) -> c (h p1) (w p2)', p1 = self.patch_size, p2=self.patch_size, w=w)
@@ -249,11 +274,6 @@ class DCTAutoencoderTransformer(nn.Module):
                     padded[:, :ih, :iw] = to_pad
                     return padded
         
-
-                # un normalize
-                x_dct_image = self.dct_unnorm(x_dct_image)
-                z_dct_image = self.dct_unnorm(z_dct_image)
-
 
                 # pads back to image size
                 x_dct_image = pad(x_dct_image, h,w)
