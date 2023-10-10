@@ -188,7 +188,7 @@ class Transformer(nn.Module):
         return self.norm(x)
 
 class NaViT(nn.Module):
-    def __init__(self, *, image_size, patch_size, num_classes, dim, depth, heads, mlp_dim, channels = 3, dim_head = 64, dropout = 0., emb_dropout = 0., token_dropout_prob = None, ):
+    def __init__(self, *, image_size, patch_size, dim, depth, heads, mlp_dim, channels = 3, dim_head = 64, dropout = 0., emb_dropout = 0., token_dropout_prob = None, ):
         super().__init__()
         image_height, image_width = pair(image_size)
 
@@ -359,6 +359,7 @@ class NaViT(nn.Module):
 
         b, s, _ = x.shape
 
+
         def revert_patching(y: torch.Tensor):
             """
             This function takes a y, which has the same leading shape as x,
@@ -383,11 +384,7 @@ class NaViT(nn.Module):
                     image_tokens = y[batch_i, image_mask, :]
                     image_positions = positions[image_mask]
                     h, w = image_positions.max(dim=0).values + 1
-                    image = torch.zeros((h, w, z), device=y.device, dtype=y.dtype)
-
-                    # TODO make this batched
-                    for i,(j,k) in enumerate(image_positions):
-                        image[j,k] = image_tokens[i]
+                    image = rearrange(image_tokens, '(h w) (c p1 p2) -> c (h p1) (w p2)', p1 = p, p2=p, w=w, h=h)
                     images.append(image)
 
             return images

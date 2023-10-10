@@ -39,6 +39,7 @@ def make_image_grid(x, x_hat, filename=None, n: int = 10, max_size:int=1024):
     h = max([s[1] for s in sizes])
     w = max([s[2] for s in sizes])
 
+
     
     ims = [transforms.Resize(256, max_size=max_size)(im) for im in ims]
 
@@ -67,7 +68,7 @@ def validate(
         x = x.to(device)
         with torch.no_grad():
             with torch.autocast(device):
-                out = vq_autoencoder(x)
+                out = vq_autoencoder(x, decode=True)
         if use_wandb:
             wandb.log(
                 {
@@ -96,10 +97,10 @@ def train(
     epochs: int = 1,
     device="cuda",
     dtype=torch.float16,
-    log_every=20,
+    log_every=10,
     n_log:int=10,
     max_steps=1e20,
-    warmup_steps=100,
+    warmup_steps=10,
     use_wandb: bool = False,
 ):
     optimizer = torch.optim.Adam(vq_autoencoder.parameters(), lr=1e-9)
@@ -162,7 +163,6 @@ def train(
                             rec_loss=out["rec_loss"].item(),
                             commit_loss=commit_loss.item(),
                             perplexity=out["perplexity"].item(),
-                            pixel_loss=out["pixel_loss"].item(),
                         )
                     }
                 )
@@ -196,6 +196,7 @@ def load_and_transform_dataset(
         # norm parameters taken from clip
         _transforms = transforms.Compose(
             [
+                #transforms.RandomResizedCrop((512,512)),
                 transforms.ToImage(),
                 transforms.ConvertImageDtype(torch.float32),
             ]
@@ -217,7 +218,7 @@ def main(
     use_wandb: bool = False,
 ):
     feature_channels = 768
-    patch_size = 32
+    patch_size = 16
     dct_compression_factor=0.75
 
     ds_train = load_and_transform_dataset(

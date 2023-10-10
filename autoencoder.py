@@ -19,12 +19,12 @@ class DCTAutoencoderTransformer(nn.Module):
         self,
         vq_model,
         image_channels: int=3,
-        depth:int =8,
+        depth:int =4,
         feature_channels: int=768,
-        patch_size: int=16,
+        patch_size: int=32,
         # only take 75 of the dct features and pass to the encoder
         dct_compression_factor: float = 0.75,
-        max_n_patches: int = 16,
+        max_n_patches: int = 512,
     ):
         """
         input_res: the square integer input resolution size.
@@ -51,12 +51,11 @@ class DCTAutoencoderTransformer(nn.Module):
         self.encoder = NaViT(
             image_size=max_n_patches * patch_size,
             patch_size=patch_size,
-            num_classes=feature_channels,
             dim=feature_channels,
             depth=depth,
             heads=4,
             channels=image_channels,
-            mlp_dim=2048,
+            mlp_dim=1024,
             dropout=0.1,
             emb_dropout=0.1,
             token_dropout_prob=None,  # token dropout of 10% (keep 90% of tokens)
@@ -66,8 +65,7 @@ class DCTAutoencoderTransformer(nn.Module):
         self.vq_model.accept_image_fmap = False
         self.vq_model.channel_last = True
 
-        self.ema_initted = False
-        self.ema_alpha = 1e-3
+        self.ema_alpha = 1e-4
         max_res = patch_size * max_n_patches
         self.max_res = max_res
         self.dct_mean = nn.Parameter(torch.zeros(max_res, max_res), requires_grad=False)
@@ -75,17 +73,12 @@ class DCTAutoencoderTransformer(nn.Module):
 
 
     def dct_norm(self, x:torch.Tensor, eps=1e-7):
-        return x
         *_, h, w = x.shape
         mean = reduce(x, '... h w -> h w', 'mean')
         std = reduce(x, '... h w -> h w', torch.var)
 
         if self.training:
-            if self.ema_initted:
-                ema_update_2d(self.dct_mean, mean, self.ema_alpha)
-            else:
-                ema_update_2d(self.dct_mean, mean, 1.0)
-                self.ema_initted = True
+            ema_update_2d(self.dct_mean, mean, self.ema_alpha)
 
         # normalizes
         mean = self.dct_mean[:h, :w]
@@ -94,7 +87,6 @@ class DCTAutoencoderTransformer(nn.Module):
         return (x - mean) / torch.clamp(std, eps)
 
     def dct_unnorm(self, x:torch.Tensor):
-        return x
         *_, h, w = x.shape
         mean = self.dct_mean[:h, :w]
         std = self.dct_std[:h, :w]
@@ -128,7 +120,7 @@ class DCTAutoencoderTransformer(nn.Module):
 
             x_dct = dct2(x, "ortho")
         
-            h_c, w_c = self.dct_compression_factor * h, self.dct_compression_factor * w
+            h_c, w_c = (1-self.dct_compression_factor) * h, (1-self.dct_compression_factor) * w
 
             p_h = round(h_c / self.patch_size)
             p_w = round(w_c / self.patch_size)
@@ -153,7 +145,6 @@ class DCTAutoencoderTransformer(nn.Module):
             p_w = min(p_w, p_w_c)
             p_h = max(p_h, 1)
             p_w = max(p_w, 1)
-
 
             dct_h = p_h * self.patch_size
             dct_w = p_w * self.patch_size
@@ -204,14 +195,26 @@ class DCTAutoencoderTransformer(nn.Module):
 
         # TODO figure out how to make the mask work
         # with the vq model
-        z, codes, commit_loss = self.vq_model(z, mask=mask)
+        #z, codes, commit_loss = self.vq_model(z, mask=mask)
+        codes = torch.Tensor([0]).to(torch.long).to(z.device)
+        commit_loss = torch.Tensor([0.0]).to(z.device).to(z.dtype)
 
         with torch.no_grad():
-            perplexity = calculate_perplexity(codes[mask], self.vq_model.codebook_size)
+            #perplexity = calculate_perplexity(codes[mask], self.vq_model.codebook_size)
+            perplexity = torch.Tensor([0.0]).to(z.device).to(z.dtype)
 
         z = self.proj_out(z)
 
         rec_loss = F.mse_loss(z[mask], patches[mask])
+
+
+        #from util import imshow
+        #import matplotlib.pyplot as plt
+
+        #patch_rec = revert_patching(patches)
+
+        ## this needs to pass, they should be exactly the same
+        #assert torch.equal(patch_rec[0].reshape(3,256,256), x[0])
 
         if not decode:
             return dict(
@@ -236,7 +239,9 @@ class DCTAutoencoderTransformer(nn.Module):
         with torch.no_grad():
             for x_dct_image, z_dct_image, (h,w) in zip(x, z, original_sizes):
 
-                z_dct_image = rearrange(z_dct_image, 'h w (c p1 p2) -> c (h p1) (w p2)', p1=self.patch_size, p2=self.patch_size, c=self.image_channels)
+                #z_dct_image = rearrange(z_dct_image, '(h w) (c p1 p2) -> c (h p1) (w p2)', p1 = self.patch_size, p2=self.patch_size, w=w)
+
+                #z_dct_image = rearrange(z_dct_image, 'h w (c p1 p2) -> c (h p1) (w p2)', p1=self.patch_size, p2=self.patch_size, c=self.image_channels)
 
                 def pad(to_pad:torch.Tensor, h,w):
                     c, ih, iw = to_pad.shape

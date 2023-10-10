@@ -159,6 +159,7 @@ def calculate_perplexity(codes, codebook_size, null_index=-1):
 
 
 def imshow(x: torch.Tensor, ax=None):
+    x = x.cpu()
     if len(x.shape) > 2:
         x = x.permute(1, 2, 0)
     if x.dtype == torch.int:
