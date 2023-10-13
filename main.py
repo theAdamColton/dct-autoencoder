@@ -10,7 +10,6 @@ import torchvision
 import os
 import math
 import time
-import copy
 
 from dct_preproc import DCTPreprocessor
 from dct_autoenc import DCTAutoencoderTransformer
@@ -40,13 +39,11 @@ def make_image_grid(x, x_hat, filename=None, n: int = 10, max_size:int=1024):
         ims.append(im)
         ims.append(im_hat)
 
+    ims = [transforms.Resize(512, max_size=max_size)(im) for im in ims]
+
     sizes = [im.shape for im in ims]
     h = max([s[1] for s in sizes])
     w = max([s[2] for s in sizes])
-
-
-    
-    ims = [transforms.Resize(256, max_size=max_size)(im) for im in ims]
 
     ims = [F.pad(im, (w-im.shape[2], 0, h-im.shape[1], 0)) for im in ims]
 
@@ -203,8 +200,10 @@ def train(
 def load_and_transform_dataset(
     dataset_name_or_url: str,
     split: str,
+    min_res:int,
 ):
     ds = datasets.load_dataset(dataset_name_or_url, split=split)
+    ds = ds.filter(lambda x: x['image'].size[0] > min_res and x['image'].size[1] > min_res)
 
     def f(examples):
         # norm parameters taken from clip
@@ -236,10 +235,10 @@ def main(
     dct_compression_factor=0.80
 
     ds_train = load_and_transform_dataset(
-        image_dataset_path_or_url, split="train",
+        image_dataset_path_or_url, split="train", min_res=32,
     )
     ds_test = load_and_transform_dataset(
-        image_dataset_path_or_url, split="test",
+        image_dataset_path_or_url, split="test", min_res=32,
     )
     dtype = torch.float16
 

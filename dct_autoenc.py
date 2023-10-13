@@ -7,8 +7,9 @@ import torchvision.transforms.v2 as transforms
 
 from na_vit import NaViT, FeedForward
 
+from norm import Norm3D
+
 from util import (
-    StreamingMeanStd2D,
     calculate_perplexity,
     dct2,
     idct2,
@@ -69,7 +70,7 @@ class DCTAutoencoderTransformer(nn.Module):
 
         max_res = patch_size * max_n_patches
         self.max_res = max_res
-        self.dct_stats = StreamingMeanStd2D(self.max_res, self.max_res)
+        self.dct_norm = Norm3D(self.max_res, self.max_res)
 
         self.dct_std_eps = 1e-2
 
@@ -78,11 +79,11 @@ class DCTAutoencoderTransformer(nn.Module):
         # records stats of x
         if self.training:
             for im in x:
-                self.dct_stats(im)
+                self.dct_norm(im)
 
         # normalizes
-        mean = self.dct_stats.mean
-        std = self.dct_stats.std
+        mean = self.dct_norm.mean
+        std = self.dct_norm.std
         out = []
 
         while len(x) > 0:
@@ -95,8 +96,8 @@ class DCTAutoencoderTransformer(nn.Module):
     def dct_unnorm(self, x:List[torch.Tensor]):
         # xnorm = (x-mean) / std
         # x = xnorm*std + mean
-        mean = self.dct_stats.mean
-        std = self.dct_stats.std
+        mean = self.dct_norm.mean
+        std = self.dct_norm.std
         
         out = []
         while len(x) > 0:
@@ -195,11 +196,11 @@ class DCTAutoencoderTransformer(nn.Module):
         else:
             x = dct_features
 
-        x = self.dct_norm(x)
+        z = self.dct_norm(x)
 
-        assert not any([torch.isnan(im).any().item() for im in x])
+        assert not any([torch.isnan(im).any().item() for im in z])
 
-        encoder_out = self.encoder(x,
+        encoder_out = self.encoder(z,
              group_images = True,
              group_max_seq_len = 2048,
         )
