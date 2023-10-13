@@ -1,10 +1,21 @@
 from typing import Optional
+from typing import List
 import torch
 from torch import nn
 import matplotlib.pyplot as plt
 from torch_dct import dct_2d, idct_2d
-from einops import reduce
 
+def dict_collate(x: List[dict]):
+    o = {}
+    for d in x:
+        for k,v in d.items():
+            l = o.get(k)
+            if l is not None:
+                o[k].append(v)
+            else:
+                o[k] = [v]
+
+    return o
 
 def ema_update_2d(old:torch.Tensor, new:torch.Tensor, alpha:float=0.8):
     *_, h, w = new.shape

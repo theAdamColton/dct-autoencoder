@@ -2,7 +2,6 @@ from typing import List, Tuple
 import torch.nn.functional as F
 import torch
 import torch.nn as nn
-from einops import rearrange, reduce
 import torchvision.transforms.v2 as transforms
 
 from na_vit import NaViT, FeedForward
@@ -70,40 +69,39 @@ class DCTAutoencoderTransformer(nn.Module):
 
         max_res = patch_size * max_n_patches
         self.max_res = max_res
-        self.dct_norm = Norm3D(self.max_res, self.max_res)
+        self.dct_norm_layer = Norm3D(self.image_channels, self.max_res, self.max_res)
 
         self.dct_std_eps = 1e-2
 
 
     def dct_norm(self, x:List[torch.Tensor]):
         # records stats of x
+
         if self.training:
             for im in x:
-                self.dct_norm(im)
+                self.dct_norm_layer(im)
 
         # normalizes
-        mean = self.dct_norm.mean
-        std = self.dct_norm.std
+        mean = self.dct_norm_layer.mean
+        std = self.dct_norm_layer.std
         out = []
 
-        while len(x) > 0:
-            image = x.pop(0)
+        for image in x:
             _,h,w = image.shape
-            out.append((image - mean[:h, :w]) / torch.clamp(std[:h, :w], self.dct_std_eps))
+            out.append((image - mean[..., :h, :w]) / torch.clamp(std[..., :h, :w], self.dct_std_eps))
 
         return out
 
     def dct_unnorm(self, x:List[torch.Tensor]):
         # xnorm = (x-mean) / std
         # x = xnorm*std + mean
-        mean = self.dct_norm.mean
-        std = self.dct_norm.std
+        mean = self.dct_norm_layer.mean
+        std = self.dct_norm_layer.std
         
         out = []
-        while len(x) > 0:
-            im = x.pop(0)
+        for im in x:
             _, h, w = im.shape
-            out.append((im * torch.clamp(std[:h, :w], self.dct_std_eps) + mean[:h, :w]))
+            out.append((im * torch.clamp(std[..., :h, :w], self.dct_std_eps) + mean[..., :h, :w]))
         return out
 
     @torch.no_grad()
@@ -260,15 +258,9 @@ class DCTAutoencoderTransformer(nn.Module):
         x_images = []
 
         with torch.no_grad():
-            # un normalize all tensors in x and z
-            x = self.dct_unnorm(x)
+            # un normalize z
             z = self.dct_unnorm(z)
             for x_dct_image, z_dct_image, (h,w) in zip(x, z, original_sizes):
-
-                #z_dct_image = rearrange(z_dct_image, '(h w) (c p1 p2) -> c (h p1) (w p2)', p1 = self.patch_size, p2=self.patch_size, w=w)
-
-                #z_dct_image = rearrange(z_dct_image, 'h w (c p1 p2) -> c (h p1) (w p2)', p1=self.patch_size, p2=self.patch_size, c=self.image_channels)
-
                 def pad(to_pad:torch.Tensor, h,w):
                     c, ih, iw = to_pad.shape
                     padded = torch.zeros(c,h,w, device=to_pad.device, dtype=to_pad.dtype)
