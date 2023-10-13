@@ -15,6 +15,39 @@ from einops.layers.torch import Rearrange
 
 # helpers
 
+class PatchNorm(nn.Module):
+    def __init__(self, patch_height_dim: int, patch_width_dim: int, patch_dim:int, eps:float=1e-1):
+        super().__init__()
+        self.eps=eps
+        self.weights = nn.Parameter(torch.ones(patch_height_dim, patch_width_dim, patch_dim))
+        self.biases = nn.Parameter(torch.zeros(patch_height_dim, patch_width_dim, patch_dim))
+        self.patch_dim = patch_dim
+
+    def forward(self, patches: torch.Tensor, pos_h: torch.LongTensor, pos_w: torch.LongTensor, key_pad_mask: torch.BoolTensor):
+        """
+        normalizes patches using patch wieghts and biases that are indexed by pos_h and pos_w
+
+        patches should be (..., dim)
+
+        TODO is masking necessary?
+        """
+        patches_shape = patches.shape
+         
+        # first masks based on the key_pad_mask
+        # this is important because we don't want the patch statistics effected
+        # by the padding patches, which are all zeros
+        pos_h = pos_h[~key_pad_mask]
+        pos_w = pos_w[~key_pad_mask]
+        patches = patches[~key_pad_mask]
+
+        weights = self.weights[pos_h, pos_w, :]
+        biases = self.biases[pos_h, pos_w, :]
+        patches = F.layer_norm(patches, weights.shape, weights, biases, self.eps)
+        out = torch.zeros(patches_shape, dtype=patches.dtype, device=patches.device)
+        out[~key_pad_mask] = patches
+        return out
+
+
 def exists(val):
     return val is not None
 
@@ -188,7 +221,7 @@ class Transformer(nn.Module):
         return self.norm(x)
 
 class NaViT(nn.Module):
-    def __init__(self, *, image_size, patch_size, dim, depth, heads, mlp_dim, channels = 3, dim_head = 64, dropout = 0., emb_dropout = 0., token_dropout_prob = None, norm_in:bool = True):
+    def __init__(self, *, image_size, patch_size, dim, depth, heads, mlp_dim, channels = 3, dim_head = 64, dropout = 0., emb_dropout = 0., token_dropout_prob = None, pos_embed_before_proj:bool=True):
         super().__init__()
         image_height, image_width = pair(image_size)
 
@@ -216,14 +249,18 @@ class NaViT(nn.Module):
         self.channels = channels
         self.patch_size = patch_size
 
+        self.patch_norm = PatchNorm(patch_height_dim, patch_width_dim, patch_dim)
+
         self.to_patch_embedding = nn.Sequential(
-            LayerNorm(patch_dim) if norm_in else nn.Identity(),
             nn.Linear(patch_dim, dim),
             LayerNorm(dim),
         )
 
-        self.pos_embed_height = nn.Parameter(torch.randn(patch_height_dim, dim))
-        self.pos_embed_width = nn.Parameter(torch.randn(patch_width_dim, dim))
+        pos_dim = patch_dim if pos_embed_before_proj else dim
+        self.pos_embed_before_proj = pos_embed_before_proj
+
+        self.pos_embed_height = nn.Parameter(torch.zeros(patch_height_dim, pos_dim))
+        self.pos_embed_width = nn.Parameter(torch.zeros(patch_width_dim, pos_dim))
 
         self.dropout = nn.Dropout(emb_dropout)
 
@@ -267,6 +304,7 @@ class NaViT(nn.Module):
             sequences = []
             positions = []
             image_ids = torch.empty((0,), device = device, dtype = torch.long)
+            image_dimensions = []
 
             for image_id, image in enumerate(images):
                 assert image.ndim ==3 and image.shape[0] == c
@@ -296,6 +334,7 @@ class NaViT(nn.Module):
                 image_ids = F.pad(image_ids, (0, seq.shape[-2]), value = image_id)
                 sequences.append(seq)
                 positions.append(pos)
+                image_dimensions.append(torch.Tensor(image_dims))
 
             batched_image_ids.append(image_ids)
             batched_sequences.append(torch.cat(sequences, dim = 0))
@@ -315,7 +354,6 @@ class NaViT(nn.Module):
 
         # combine patched images as well as the patched width / height positions for 2d positional embedding
 
-
         patches = pad_sequence(batched_sequences)
 
         patch_positions = pad_sequence(batched_positions)
@@ -324,18 +362,24 @@ class NaViT(nn.Module):
 
         num_images = torch.tensor(num_images, device = device, dtype = torch.long)        
 
-        # to patches
-
-        x = self.to_patch_embedding(patches)        
-
         # factorized 2d absolute positional embedding
 
         h_indices, w_indices = patch_positions.unbind(dim = -1)
 
-        h_pos = self.pos_embed_height[h_indices]
-        w_pos = self.pos_embed_width[w_indices]
+        # normalizes patches
+        x = self.patch_norm(patches, h_indices, w_indices, key_pad_mask)
 
-        x = x + h_pos + w_pos
+        # possibly adds pos embedding info before projecting in
+        if self.pos_embed_before_proj:
+            h_pos = self.pos_embed_height[h_indices]
+            w_pos = self.pos_embed_width[w_indices]
+            x = x + h_pos + w_pos
+            x = self.to_patch_embedding(x)        
+        else:
+            x = self.to_patch_embedding(x)        
+            h_pos = self.pos_embed_height[h_indices]
+            w_pos = self.pos_embed_width[w_indices]
+            x = x + h_pos + w_pos
 
         # embed dropout
 
@@ -378,4 +422,4 @@ class NaViT(nn.Module):
             return images
                     
 
-        return dict(x=x, revert_patching=revert_patching, key_pad_mask=key_pad_mask, patches=patches)
+        return dict(x=x, revert_patching=revert_patching, key_pad_mask=key_pad_mask, patches=patches, h_indices=h_indices, w_indices=w_indices)

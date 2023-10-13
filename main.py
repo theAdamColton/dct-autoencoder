@@ -101,7 +101,7 @@ def train(
     learning_rate=1e-3,
     epochs: int = 1,
     device="cuda",
-    dtype=torch.float16,
+    dtype=torch.bfloat16,
     log_every=2,
     n_log:int=10,
     max_steps=1e20,
@@ -136,10 +136,11 @@ def train(
             loss = out["rec_loss"] + commit_loss
 
             loss.backward()
+            torch.nn.utils.clip_grad_norm(vq_autoencoder.parameters(), 5.0)
             optimizer.step()
 
             print(
-                    f"epoch: {epoch} loss: {loss.item():.3f} rec_loss: {out['rec_loss'].item():.2f} commit_loss: {commit_loss.item():.2f} perpelxity: {out['perplexity'].item():.2f} pixel_loss: {out['pixel_loss'].item():.2f}"
+                    f"epoch: {epoch} loss: {loss.item():.3f} rec_loss: {out['rec_loss'].item():.2f} commit_loss: {commit_loss.item():.2f} perpelxity: {out['perplexity'].item():.2f}"
             )
 
             if use_wandb:
@@ -165,10 +166,11 @@ def train(
                         out = vq_autoencoder(dct_features=dct_features, original_sizes=original_sizes, decode=True)
                 vq_autoencoder.train()
                 image = make_image_grid(out['x'], out['x_hat'], filename=f"{OUTDIR}/train image {i:04}.png")
+                log_d = {"train": dict(epoch=epoch, step=i, image=wandb.Image(image), pixel_loss=out['pixel_loss'].item(), rec_loss=out['rec_loss'].item())}
+                print("logging:", log_d)
+
                 if use_wandb:
-                    wandb.log(
-                        {"train": dict(epoch=epoch, step=i, image=wandb.Image(image), pixel_loss=out['pixel_loss'], rec_loss=out['rec_loss'])}
-                    )
+                    wandb.log(log_d)
 
             if n_steps > max_steps:
                 return vq_autoencoder
@@ -184,7 +186,7 @@ def load_and_transform_dataset(
     min_res = dct_preproc.patch_size
 
     def filter_res(x):
-        h, w = x['json']['HEIGHT'], x['json']['WIDTH']
+        h, w = x['json']['height'], x['json']['width']
         if h is None or w is None:
             return False
         return False if h < min_res or w < min_res else True
@@ -197,7 +199,6 @@ def load_and_transform_dataset(
         .map_dict(json=json.loads) \
         .select(filter_res) \
         .decode('torchrgb', partial=True) \
-        .shuffle(1000) \
         .rename(pixel_values='jpg') \
         .map(preproc) \
         .rename_keys(original_sizes='original_sizes', dct_features='dct_features') # drops old columns
@@ -207,15 +208,14 @@ def load_and_transform_dataset(
 def main(
     image_dataset_path_or_url="imagenet-1k",
     device="cuda",
+    dtype = torch.bfloat16,
     batch_size: int = 32,
     use_wandb: bool = False,
 ):
 
-    feature_channels:int = 768
-    dct_compression_factor=0.80
+    feature_channels:int = 1024
+    dct_compression_factor=0.75
     max_n_patches = 128
-
-    dtype = torch.float16
 
     def get_vq_autoencoder(codebook_size, heads, patch_size):
         vq_model = vector_quantize_pytorch.VectorQuantize(
@@ -231,7 +231,7 @@ def main(
             sample_codebook_temp=1.0,
             decay=0.90,
             
-        ).to(device)
+        ).to(dtype).to(device)
 
         return DCTAutoencoderTransformer(
             vq_model,
@@ -239,17 +239,16 @@ def main(
             patch_size=patch_size,
             dct_compression_factor=dct_compression_factor,
             max_n_patches=max_n_patches,
-        ).to(device)
+        ).to(dtype).to(device)
 
     codebook_size = 256
-
     heads = 16
 
 
 #    for codebook_size in codebook_sizes:
 #        for heads in head_numbers:
-    for learning_rate in [1e-3, 3e-3]:
-        for patch_size in [32, 16]:
+    for learning_rate in [3e-3]:
+        for patch_size in [16]:
             vq_autoencoder = get_vq_autoencoder(codebook_size, heads, patch_size)
 
             dct_preproc = get_dct_preproc(vq_autoencoder)

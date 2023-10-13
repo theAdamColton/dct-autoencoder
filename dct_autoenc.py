@@ -6,25 +6,22 @@ import torchvision.transforms.v2 as transforms
 
 from na_vit import NaViT, FeedForward
 
-from norm import Norm3D
-
 from util import (
     calculate_perplexity,
     dct2,
     idct2,
-    ema_update_2d,
 )
 
 class DCTAutoencoderTransformer(nn.Module):
     def __init__(
         self,
         vq_model,
-        image_channels: int=3,
-        depth:int =8,
+        image_channels:int=3,
+        depth:int=4,
         feature_channels: int=1024,
-        patch_size: int=32,
+        patch_size:int=32,
         dct_compression_factor: float = 0.80,
-        max_n_patches: int = 512,
+        max_n_patches:int=512,
     ):
         """
         input_res: the square integer input resolution size.
@@ -54,13 +51,12 @@ class DCTAutoencoderTransformer(nn.Module):
             patch_size=patch_size,
             dim=feature_channels,
             depth=depth,
-            heads=4,
+            heads=8,
             channels=image_channels,
             mlp_dim=mlp_dim,
             dropout=0.1,
             emb_dropout=0.1,
             token_dropout_prob=None,  # token dropout of 10% (keep 90% of tokens)
-            norm_in=False,
         )
 
         self.vq_model = vq_model
@@ -69,40 +65,6 @@ class DCTAutoencoderTransformer(nn.Module):
 
         max_res = patch_size * max_n_patches
         self.max_res = max_res
-        self.dct_norm_layer = Norm3D(self.image_channels, self.max_res, self.max_res)
-
-        self.dct_std_eps = 1e-2
-
-
-    def dct_norm(self, x:List[torch.Tensor]):
-        # records stats of x
-
-        if self.training:
-            for im in x:
-                self.dct_norm_layer(im)
-
-        # normalizes
-        mean = self.dct_norm_layer.mean
-        std = self.dct_norm_layer.std
-        out = []
-
-        for image in x:
-            _,h,w = image.shape
-            out.append((image - mean[..., :h, :w]) / torch.clamp(std[..., :h, :w], self.dct_std_eps))
-
-        return out
-
-    def dct_unnorm(self, x:List[torch.Tensor]):
-        # xnorm = (x-mean) / std
-        # x = xnorm*std + mean
-        mean = self.dct_norm_layer.mean
-        std = self.dct_norm_layer.std
-        
-        out = []
-        for im in x:
-            _, h, w = im.shape
-            out.append((im * torch.clamp(std[..., :h, :w], self.dct_std_eps) + mean[..., :h, :w]))
-        return out
 
     @torch.no_grad()
     def prepare_batch(self, batch: List[torch.Tensor]):
@@ -184,29 +146,18 @@ class DCTAutoencoderTransformer(nn.Module):
 
 
     def forward(self, pixel_values: List[torch.Tensor]=None, dct_features: List[torch.Tensor]=None, original_sizes:List[Tuple] = None, decode:bool=True):
-        """
-        x: list of tensors containing unnormalized image pixels
-        """
-
         if dct_features is None:
             # list of dct tensors
-            x, original_sizes = self.prepare_batch(pixel_values)
-        else:
-            x = dct_features
+            dct_features, original_sizes = self.prepare_batch(pixel_values)
 
-        z = self.dct_norm(x)
-
-        assert not any([torch.isnan(im).any().item() for im in z])
-
-        encoder_out = self.encoder(z,
+        encoder_out = self.encoder(dct_features,
              group_images = True,
-             group_max_seq_len = 2048,
+             group_max_seq_len = self.max_n_patches * 2,
         )
 
         z = encoder_out['x']
-
-        assert not torch.isnan(z).any().item()
-
+        h_indices = encoder_out['h_indices']
+        w_indices = encoder_out['w_indices']
         mask = encoder_out['key_pad_mask']
         revert_patching = encoder_out['revert_patching']
         patches = encoder_out['patches']
@@ -226,16 +177,9 @@ class DCTAutoencoderTransformer(nn.Module):
 
         z = self.proj_out(z)
 
+        # loss between z and normalized patches
         rec_loss = F.mse_loss(z[mask], patches[mask])
 
-
-        #from util import imshow
-        #import matplotlib.pyplot as plt
-
-        #patch_rec = revert_patching(patches)
-
-        ## this needs to pass, they should be exactly the same
-        #assert torch.equal(patch_rec[0].reshape(3,256,256), x[0])
 
         if not decode:
             return dict(
@@ -243,14 +187,18 @@ class DCTAutoencoderTransformer(nn.Module):
                     commit_loss=commit_loss,
                     rec_loss=rec_loss,
                     codes=codes,
-                    z=z,
-                    x=x,
             )
-
 
         # reverts patching, z is now a list of tensors,
         # each tensor being an image of patches
         z = revert_patching(z)
+
+        ## this needs to pass, they should be exactly the same
+        # TODO
+        #patch_rec = revert_patching(patches)
+        #assert torch.equal(patch_rec[0], dct_features[0])
+
+        dct_features = revert_patching(patches)
 
         pixel_loss = 0.0
 
@@ -258,22 +206,19 @@ class DCTAutoencoderTransformer(nn.Module):
         x_images = []
 
         with torch.no_grad():
-            # un normalize z
-            z = self.dct_unnorm(z)
-            for x_dct_image, z_dct_image, (h,w) in zip(x, z, original_sizes):
+            for dct_image, z_dct_image, (h,w) in zip(dct_features, z, original_sizes):
                 def pad(to_pad:torch.Tensor, h,w):
                     c, ih, iw = to_pad.shape
                     padded = torch.zeros(c,h,w, device=to_pad.device, dtype=to_pad.dtype)
                     padded[:, :ih, :iw] = to_pad
                     return padded
         
-
                 # pads back to image size
-                x_dct_image = pad(x_dct_image, h,w)
+                dct_image = pad(dct_image, h,w)
                 z_dct_image = pad(z_dct_image, h,w)
 
                 # FFT doesn't support cuda for non powers of two
-                x_image = idct2(x_dct_image.detach().float().cpu(), "ortho")
+                x_image = idct2(dct_image.detach().float().cpu(), "ortho")
                 z_image = idct2(z_dct_image.detach().float().cpu(), "ortho")
                 pixel_loss = pixel_loss + F.mse_loss(x_image, z_image)
 
@@ -288,7 +233,6 @@ class DCTAutoencoderTransformer(nn.Module):
             commit_loss=commit_loss,
             rec_loss=rec_loss,
             codes=codes,
-            z=z,
             x=x_images,
             pixel_loss=pixel_loss,
         )
