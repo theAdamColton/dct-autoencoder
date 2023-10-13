@@ -189,6 +189,9 @@ class DCTAutoencoderTransformer(nn.Module):
                     codes=codes,
             )
 
+        z = self.encoder.patch_norm.inverse_norm(z, h_indices, w_indices)
+        patches = self.encoder.patch_norm.inverse_norm(patches, h_indices, w_indices)
+
         # reverts patching, z is now a list of tensors,
         # each tensor being an image of patches
         z = revert_patching(z)

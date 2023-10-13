@@ -58,40 +58,6 @@ def make_image_grid(x, x_hat, filename=None, n: int = 10, max_size:int=1024):
     return im
 
 
-def validate(
-    vq_autoencoder,
-    val_ds,
-    batch_size: int = 32,
-    device="cuda",
-    dtype=torch.float16,
-    use_wandb: bool = False,
-):
-    vq_autoencoder.eval()
-    dataloader = DataLoader(val_ds, batch_size=batch_size, num_workers=0, collate_fn=dict_collate)
-    for i, batch in enumerate(tqdm(dataloader)):
-        x = batch["pixel_values"]
-        x = x.to(device)
-        with torch.no_grad():
-            with torch.autocast(device):
-                out = vq_autoencoder(x, decode=True)
-        if use_wandb:
-            wandb.log(
-                {
-                    "val": dict(
-                        step=i,
-                        rec_loss=out["rec_loss"].item(),
-                        commit_loss=out["commit_loss"].item(),
-                        perplexity=out["perplexity"].item(),
-                        pixel_loss=out["pixel_loss"].item(),
-                    )
-                }
-            )
-
-        if i == 0:
-            image = make_image_grid(out['x'], out['x_hat'], filename=f"{OUTDIR}/val image {i:05}.png")
-            if use_wandb:
-                wandb.log({"val": dict(image=wandb.Image(image))})
-
 
 def train(
     vq_autoencoder: DCTAutoencoderTransformer,
@@ -126,7 +92,7 @@ def train(
 
             dct_features = batch["dct_features"]
             original_sizes = batch["original_sizes"]
-            dct_features = [x.to(device) for x in dct_features]
+            dct_features = [x.to(dtype).to(device) for x in dct_features]
 
             with torch.autocast(device, dtype=dtype):
                 out = vq_autoencoder(dct_features=dct_features, original_sizes=original_sizes, decode=False)
@@ -282,14 +248,6 @@ def main(
                 batch_size=batch_size,
                 use_wandb=use_wandb,
             )
-            #validate(
-            #    vq_autoencoder,
-            #    ds_test,
-            #    device=device,
-            #    dtype=dtype,
-            #    batch_size=batch_size,
-            #    use_wandb=use_wandb,
-            #)
 
             vq_autoencoder = None
 
