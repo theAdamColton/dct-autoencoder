@@ -38,11 +38,13 @@ class PatchNorm(nn.Module):
         patch_height_dim: int,
         patch_width_dim: int,
         patch_dim: int,
-        eps: float = 1e-5,
+        eps: float = 1e-3,
+        dtype = torch.float32,
     ):
         super().__init__()
         self.eps = eps
         self.patch_dim = patch_dim
+        self.dtype = dtype
 
         self.n = nn.Parameter(
             torch.zeros(
@@ -72,10 +74,6 @@ class PatchNorm(nn.Module):
     @property
     def std(self):
         return self.var.sqrt()
-
-    @property
-    def dtype(self):
-        return self.mean.dtype
 
     def forward(
         self,

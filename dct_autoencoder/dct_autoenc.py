@@ -21,6 +21,7 @@ class DCTAutoencoder(nn.Module):
         patch_size: int = 32,
         max_n_patches: int = 512,
         dct_processor: DCTProcessor = None,
+        codebook_size: int = None,
     ):
         """
         input_res: the square integer input resolution size.
@@ -34,11 +35,17 @@ class DCTAutoencoder(nn.Module):
 
         self.vq_norm_in = nn.Sequential(
             nn.LayerNorm(feature_channels),
+            nn.GELU(),
+        )
+        self.vq_norm_out = nn.Sequential(
+            nn.LayerNorm(feature_channels),
+            nn.GELU(),
         )
 
         self.proj_out = nn.Sequential(
             FeedForward(feature_channels, mlp_dim),
             nn.LayerNorm(feature_channels),
+            nn.GELU(),
             nn.Linear(feature_channels, image_channels * patch_size**2),
         )
 
@@ -55,8 +62,8 @@ class DCTAutoencoder(nn.Module):
         )
 
         self.vq_model = vq_model
-        self.vq_model.accept_image_fmap = False
-        self.vq_model.channel_last = True
+
+        self.codebook_size = codebook_size
 
         max_res = patch_size * max_n_patches
         self.max_res = max_res
@@ -86,11 +93,13 @@ class DCTAutoencoder(nn.Module):
         # with the vq model, because it effects the codebook
         # update
         z = z.to(torch.float32)
-        z, codes, commit_loss = self.vq_model(z, mask=mask)
+        z, codes, commit_loss = self.vq_model(z)#, mask=mask)
         z = z.to(dct_normalized_patches.dtype)
 
+        z = self.vq_norm_out(z)
+
         with torch.no_grad():
-            perplexity = calculate_perplexity(codes[mask], self.vq_model.codebook_size)
+            perplexity = calculate_perplexity(codes[mask], self.codebook_size)
 
         z = self.proj_out(z)
 

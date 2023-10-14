@@ -65,7 +65,6 @@ def train(
     autoencoder: DCTAutoencoder,
     train_ds,
     batch_size: int = 32,
-    alpha: float = 1e-3,
     learning_rate=1e-3,
     epochs: int = 1,
     device="cuda",
@@ -73,8 +72,8 @@ def train(
     log_every=10,
     n_log: int = 10,
     max_steps=1e20,
-    warmup_steps=25,
-    train_norm_iters: int = 10,  # number of iterations to train the norm layer
+    warmup_steps=20,
+    train_norm_iters: int = 15,  # number of iterations to train the norm layer
     use_wandb: bool = False,
 ):
     optimizer = torch.optim.Adam(autoencoder.parameters(), lr=1e-9)
@@ -94,6 +93,7 @@ def train(
     dataloader = get_dataloader()
 
     print("training norms")
+    autoencoder.dct_processor.patch_norm.dtype = torch.float32
     for i, batch in enumerate(tqdm(dataloader)):
         if i > train_norm_iters:
             break
@@ -108,6 +108,7 @@ def train(
         print(f"{i:03} mean {mean:.2f} std {std:.2f} min {_min:.2f} max {_max:.2f}")
 
     autoencoder.dct_processor.patch_norm.frozen = True
+    autoencoder.dct_processor.patch_norm.dtype = dtype
     print("done training norm")
 
     for epoch_i, epoch in enumerate(range(epochs)):
@@ -119,8 +120,10 @@ def train(
                     g["lr"] = ((i + 1) / warmup_steps) * learning_rate
 
             batch = batch.to(device)
+            batch.patches = batch.patches.to(dtype)
             # normalizes 
-            batch.patches = autoencoder.dct_processor.patch_norm.forward(batch.patches, batch.h_indices, batch.w_indices, batch.key_pad_mask)
+            with torch.no_grad():
+                batch.patches = autoencoder.dct_processor.patch_norm.forward(batch.patches, batch.h_indices, batch.w_indices, batch.key_pad_mask)
 
             if i % log_every == 0:
                 print("logging images ....")
@@ -168,12 +171,12 @@ def train(
                     decode=False,
                 )
 
-            commit_loss = out["commit_loss"] * alpha
+            commit_loss = out["commit_loss"]
 
             loss = out["rec_loss"] + commit_loss
 
             loss.backward()
-            torch.nn.utils.clip_grad_norm(autoencoder.parameters(), 5.0)
+            torch.nn.utils.clip_grad_norm_(autoencoder.parameters(), 5.0)
             optimizer.step()
 
             print(
@@ -224,7 +227,7 @@ def load_and_transform_dataset(
         wds.WebDataset(dataset_name_or_url)
         .map_dict(json=json.loads)
         .select(filter_res)
-        .decode("torchrgb", partial=True)
+        .decode("torchrgb", partial=True, handler=wds.handlers.warn_and_continue)
         .rename(pixel_values="jpg")
         .map(preproc)
         .rename_keys(original_sizes="original_sizes", dct_features="dct_features")
@@ -239,25 +242,31 @@ def main(
     dtype=torch.bfloat16,
     batch_size: int = 32,
     use_wandb: bool = False,
+    train_norm_iters: int = 10,
 ):
-    feature_channels: int = 1024
+    feature_channels: int = 768
+    mlp_dim: int = 1024
     image_channels: int = 3
-    dct_compression_factor = 0.55
-    max_n_patches = 144
+    dct_compression_factor = 0.75
+    max_n_patches = 64
+    max_seq_len = 80
+    max_batch_size = batch_size
+    depth = 4
 
     def get_model(codebook_size, heads, patch_size):
         vq_model = vector_quantize_pytorch.VectorQuantize(
             feature_channels,
             codebook_size=codebook_size,
-            codebook_dim=64,
-            threshold_ema_dead_code=12,
+            codebook_dim=32,
+            threshold_ema_dead_code=1,
             heads=heads,
-            channel_last=False,
-            accept_image_fmap=True,
+            channel_last=True,
+            accept_image_fmap=False,
             kmeans_init=True,
             separate_codebook_per_head=False,
-            sample_codebook_temp=1.0,
-            decay=0.90,
+            sample_codebook_temp=0.8,
+            decay=0.89,
+            commitment_weight=1e-5,
         ).to(torch.float32).to(device)
 
         proc = DCTProcessor(
@@ -265,7 +274,8 @@ def main(
             patch_size=patch_size,
             dct_compression_factor=dct_compression_factor,
             max_n_patches=max_n_patches,
-            max_seq_len=max_n_patches,
+            max_seq_len=max_seq_len,
+            max_batch_size=max_batch_size,
             patch_norm_device=device,
         )
 
@@ -273,9 +283,12 @@ def main(
             DCTAutoencoder(
                 vq_model,
                 feature_channels=feature_channels,
+                mlp_dim=mlp_dim,
+                depth=depth,
                 patch_size=patch_size,
                 max_n_patches=max_n_patches,
                 dct_processor=proc,
+                codebook_size=codebook_size,
             )
             .to(dtype)
             .to(device)
@@ -290,12 +303,12 @@ def main(
         return model, proc
 
     codebook_size = 256
-    heads = 16
 
     #    for codebook_size in codebook_sizes:
     #        for heads in head_numbers:
-    for learning_rate in [1e-4, 5e-4, 1e-3, 3e-3]:
-        for patch_size in [16]:
+    for learning_rate in [5e-4]:
+        for patch_size in [8]:
+            heads = patch_size * 2
             autoencoder, processor = get_model(codebook_size, heads, patch_size)
 
             ds_train = load_and_transform_dataset(
@@ -306,6 +319,11 @@ def main(
             run_d = dict(
                 codebook_size=codebook_size,
                 heads=heads,
+                mlp_dim=mlp_dim,
+                image_channels=image_channels,
+                dct_compression_factor=dct_compression_factor,
+                max_n_patches=max_n_patches,
+                depth=depth,
                 bits=heads * math.log2(codebook_size),
                 feature_dim=feature_channels,
                 patch_size=patch_size,
@@ -324,6 +342,7 @@ def main(
                 dtype=dtype,
                 batch_size=batch_size,
                 use_wandb=use_wandb,
+                train_norm_iters=train_norm_iters,
             )
 
             autoencoder = None

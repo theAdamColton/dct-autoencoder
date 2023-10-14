@@ -49,6 +49,7 @@ class DCTProcessor:
         dct_compression_factor: float,
         max_n_patches: int,
         max_seq_len: int,
+        max_batch_size:int,
         patch_norm_device="cpu",
         token_dropout_prob=None,
     ):
@@ -61,6 +62,7 @@ class DCTProcessor:
         self.patch_norm = PatchNorm(
             max_n_patches, max_n_patches, patch_size**2 * channels
         ).to(patch_norm_device)
+        self.max_batch_size = max_batch_size
 
         # what percent of tokens to dropout
         # if int or float given, then assume constant dropout prob
@@ -187,7 +189,7 @@ class DCTProcessor:
         if isinstance(calc_token_dropout, (float, int)):
             calc_token_dropout = always(calc_token_dropout)
 
-        for image in images:
+        for i, image in enumerate(images):
             assert isinstance(image, Tensor)
 
             image_dims = image.shape[-2:]
@@ -207,6 +209,9 @@ class DCTProcessor:
 
             group.append(image)
             seq_len += image_seq_len
+
+            if len(groups) >= self.max_batch_size:
+                print(f"Warning! Truncating {len(images) - i + 1} images from batch to reach batch size of {self.max_batch_size}")
 
         if len(group) > 0:
             groups.append(group)
