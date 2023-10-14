@@ -80,17 +80,17 @@ class DCTAutoencoder(nn.Module):
 
         mask = ~dct_patches.key_pad_mask
 
-        # z = self.vq_norm_in(z)
+        z = self.vq_norm_in(z)
 
         # TODO figure out how to make the mask work
-        # with the vq model
-        # z, codes, commit_loss = self.vq_model(z, mask=mask)
-        codes = torch.Tensor([0]).to(torch.long).to(z.device)
-        commit_loss = torch.Tensor([0.0]).to(z.device).to(z.dtype)
+        # with the vq model, because it effects the codebook
+        # update
+        z = z.to(torch.float32)
+        z, codes, commit_loss = self.vq_model(z, mask=mask)
+        z = z.to(dct_normalized_patches.dtype)
 
         with torch.no_grad():
-            # perplexity = calculate_perplexity(codes[mask], self.vq_model.codebook_size)
-            perplexity = torch.Tensor([0.0]).to(z.device).to(z.dtype)
+            perplexity = calculate_perplexity(codes[mask], self.vq_model.codebook_size)
 
         z = self.proj_out(z)
 

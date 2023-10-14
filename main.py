@@ -250,7 +250,7 @@ def main(
             feature_channels,
             codebook_size=codebook_size,
             codebook_dim=64,
-            threshold_ema_dead_code=10,
+            threshold_ema_dead_code=12,
             heads=heads,
             channel_last=False,
             accept_image_fmap=True,
@@ -258,7 +258,7 @@ def main(
             separate_codebook_per_head=False,
             sample_codebook_temp=1.0,
             decay=0.90,
-        ).to(device)
+        ).to(torch.float32).to(device)
 
         proc = DCTProcessor(
             channels=image_channels,
@@ -284,6 +284,8 @@ def main(
         model.dct_processor.patch_norm = model.dct_processor.patch_norm.to(
             torch.float32
         )
+
+        model.vq_model = model.vq_model.to(torch.float32)
 
         return model, proc
 
