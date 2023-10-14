@@ -18,23 +18,31 @@ def build_batch(n=100):
     x = []
     pos_h = []
     pos_w = [] 
+    mask = []
     for _ in range(n):
-        h = randint(0, patch_h-1)
-        w = randint(0, patch_h-1)
+        if randint(0, 3) == 1:
+            h = 0
+            w = 0
+            sample = torch.randn(patch_dim) * 1000
+            m = 1
+        else:
+            h = randint(0, patch_h-1)
+            w = randint(0, patch_h-1)
+            sample = torch.randn(patch_dim) * stds + means
+            m = 0
+        x.append(sample)
         pos_h.append(h)
         pos_w.append(w)
-        x.append(torch.randn(patch_dim) * stds + means)
+        mask.append(m)
 
-    mask = torch.zeros(n, dtype=torch.bool)
-
-    return torch.stack(x), torch.LongTensor(pos_h), torch.LongTensor(pos_w), mask
+    return torch.stack(x), torch.LongTensor(pos_h), torch.LongTensor(pos_w), torch.BoolTensor(mask)
         
 
-for _ in range(25):
+for _ in range(150):
     x, pos_h, pos_w, mask = build_batch()
     x_norm = patchnorm(x, pos_h, pos_w, mask)
 
-    x_norm_std = reduce(patchnorm.std, 'h w z -> z', torch.std)
+    x_norm_std = reduce(patchnorm.std, 'h w z -> z', torch.mean)
     x_norm_mean = reduce(patchnorm.mean, 'h w z -> z', torch.mean)
 
     print("predicted stds", x_norm_std)

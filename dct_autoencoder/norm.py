@@ -38,7 +38,7 @@ class PatchNorm(nn.Module):
         patch_height_dim: int,
         patch_width_dim: int,
         patch_dim: int,
-        eps: float = 1e-4,
+        eps: float = 1e-5,
     ):
         super().__init__()
         self.eps = eps
@@ -55,9 +55,8 @@ class PatchNorm(nn.Module):
             torch.zeros(patch_height_dim, patch_width_dim, patch_dim),
             requires_grad=False,
         )
-        # initializes m2 at eps
         self.m2 = nn.Parameter(
-            torch.ones(patch_height_dim, patch_width_dim, patch_dim) * eps,
+            torch.zeros(patch_height_dim, patch_width_dim, patch_dim),
             requires_grad=False,
         )
 
@@ -65,8 +64,8 @@ class PatchNorm(nn.Module):
 
     @property
     def var(self):
-        mask = self.n == 0
-        var = self.m2.clamp(0.0, 1e9) / self.n.unsqueeze(-1).clamp(1.0)
+        mask = self.n < 2
+        var = self.m2 / self.n.unsqueeze(-1).clamp(1.0)
         var[mask] = 1.0
         return var
 
@@ -102,6 +101,7 @@ class PatchNorm(nn.Module):
         pos_h = pos_h[~key_pad_mask]
         pos_w = pos_w[~key_pad_mask]
         patches = patches[~key_pad_mask]
+
 
         if self.training and not self.frozen:
             with torch.no_grad():
