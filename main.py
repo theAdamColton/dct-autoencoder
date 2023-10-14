@@ -1,3 +1,4 @@
+from typing import List
 from tqdm import tqdm
 import torch
 import vector_quantize_pytorch
@@ -12,22 +13,22 @@ import time
 import json
 import wandb
 
-from dct_preproc import DCTPreprocessor
-from dct_autoenc import DCTAutoencoderTransformer
-from util import dict_collate
+from dct_autoencoder.dct_processor import DCTProcessor
+from dct_autoencoder.dct_autoenc import DCTAutoencoder
 
 OUTDIR = f"out/{time.ctime()}/"
 
 os.makedirs(OUTDIR, exist_ok=True)
 
-# https://github.com/pytorch/pytorch/issues/973
-import resource
-rlimit = resource.getrlimit(resource.RLIMIT_NOFILE)
-resource.setrlimit(resource.RLIMIT_NOFILE, (4096, rlimit[1]))
-
-
-def get_dct_preproc(vq_autoencoder:DCTAutoencoderTransformer):
-    return DCTPreprocessor(image_channels=vq_autoencoder.image_channels, patch_size=vq_autoencoder.patch_size, dct_compression_factor=vq_autoencoder.dct_compression_factor, max_n_patches=vq_autoencoder.max_n_patches)
+def get_collate_fn(processor:DCTProcessor, device):
+    def collate(x: List[dict]):
+        dct_features = []
+        original_sizes = []
+        for d in x:
+            dct_features.append(d["dct_features"])
+            original_sizes.append(d['original_sizes'])
+        return processor.patch_images(dct_features, original_sizes)
+    return collate
 
 
 def make_image_grid(x, x_hat, filename=None, n: int = 10, max_size:int=1024):
@@ -60,7 +61,7 @@ def make_image_grid(x, x_hat, filename=None, n: int = 10, max_size:int=1024):
 
 
 def train(
-    vq_autoencoder: DCTAutoencoderTransformer,
+    autoencoder: DCTAutoencoder,
     train_ds,
     batch_size: int = 32,
     alpha: float = 1e-3,
@@ -72,24 +73,48 @@ def train(
     n_log:int=10,
     max_steps=1e20,
     warmup_steps=25,
+    train_norm_iters: int = 50, # number of iterations to train the norm layer
     use_wandb: bool = False,
 ):
-    optimizer = torch.optim.Adam(vq_autoencoder.parameters(), lr=1e-9)
+    optimizer = torch.optim.Adam(autoencoder.parameters(), lr=1e-9)
 
     n_steps = 0
 
+    collate_fn = get_collate_fn(autoencoder.dct_processor, device)
+
+    # trains norm layer
+    train_ds = train_ds.shuffle(1000)
+    def get_dataloader():
+        return DataLoader(
+                train_ds, batch_size=batch_size, num_workers=0, collate_fn=collate_fn
+        )
+
+    dataloader = get_dataloader()
+
+    print("training norms")
+    for i, batch in enumerate(tqdm(dataloader)):
+        batch = batch.to(device)
+        normalized_patches = autoencoder.dct_processor.patch_norm.forward(batch.patches, batch.h_indices, batch.w_indices, batch.key_pad_mask)
+        mean = torch.stack([x.mean() for x in normalized_patches]).mean()
+        std = torch.stack([x.std() for x in normalized_patches]).std()
+        print(f"{i:03} mean {mean:.2f} std {std:.2f}")
+
+    autoencoder.dct_processor.patch_norm.frozen = True
+    print("done training norm")
+
     for epoch_i, epoch in enumerate(range(epochs)):
         train_ds = train_ds.shuffle(1000)
-        dataloader = DataLoader(
-                train_ds, batch_size=batch_size, num_workers=0, collate_fn=dict_collate
-        )
+        dataloader = get_dataloader()
         for i, batch in enumerate(tqdm(dataloader)):
+
             if epoch_i == 0 and i < warmup_steps:
                 for g in optimizer.param_groups:
                     g["lr"] = ((i + 1) / warmup_steps) * learning_rate
 
             optimizer.zero_grad()
 
+            import bpdb
+            bpdb.set_trace()
             dct_features = batch["dct_features"]
             original_sizes = batch["original_sizes"]
             dct_features = [x.to(dtype).to(device) for x in dct_features]
@@ -97,11 +122,11 @@ def train(
 
             if i % log_every == 0:
                 print("logging images ....")
-                vq_autoencoder.eval()
+                autoencoder.eval()
                 with torch.no_grad():
                     with torch.autocast(device):
-                        out = vq_autoencoder(dct_features=dct_features[:n_log], original_sizes=original_sizes[:n_log], decode=True)
-                vq_autoencoder.train()
+                        out = autoencoder(dct_features=dct_features[:n_log], original_sizes=original_sizes[:n_log], decode=True)
+                autoencoder.train()
                 image = make_image_grid(out['x'], out['x_hat'], filename=f"{OUTDIR}/train image {i:04}.png")
                 log_d = {"train": dict(epoch=epoch, step=i, image=wandb.Image(image), pixel_loss=out['pixel_loss'].item(), rec_loss=out['rec_loss'].item())}
                 print("log:", log_d)
@@ -111,14 +136,14 @@ def train(
 
 
             with torch.autocast(device, dtype=dtype):
-                out = vq_autoencoder(dct_features=dct_features, original_sizes=original_sizes, decode=False)
+                out = autoencoder(dct_features=dct_features, original_sizes=original_sizes, decode=False)
 
             commit_loss = out["commit_loss"] * alpha
 
             loss = out["rec_loss"] + commit_loss
 
             loss.backward()
-            torch.nn.utils.clip_grad_norm(vq_autoencoder.parameters(), 5.0)
+            torch.nn.utils.clip_grad_norm(autoencoder.parameters(), 5.0)
             optimizer.step()
 
             print(
@@ -140,17 +165,17 @@ def train(
                 )
 
             if n_steps > max_steps:
-                return vq_autoencoder
+                return autoencoder
 
             n_steps += 1
 
-    return vq_autoencoder
+    return autoencoder
 
 def load_and_transform_dataset(
     dataset_name_or_url: str,
-    dct_preproc: DCTPreprocessor,
+    dct_processor: DCTProcessor,
 ):
-    min_res = dct_preproc.patch_size
+    min_res = dct_processor.patch_size
 
     def filter_res(x):
         h, w = x['json']['height'], x['json']['width']
@@ -159,7 +184,7 @@ def load_and_transform_dataset(
         return False if h < min_res or w < min_res else True
 
     def preproc(x):
-        x['dct_features'], x['original_sizes'] = dct_preproc(x['pixel_values'])
+        x['dct_features'], x['original_sizes'] = dct_processor.image_to_dct(x['pixel_values'])
         return x
 
     ds = wds.WebDataset(dataset_name_or_url) \
@@ -181,10 +206,11 @@ def main(
 ):
 
     feature_channels:int = 1024
+    image_channels:int=3
     dct_compression_factor=0.75
     max_n_patches = 128
 
-    def get_vq_autoencoder(codebook_size, heads, patch_size):
+    def get_model(codebook_size, heads, patch_size):
         vq_model = vector_quantize_pytorch.VectorQuantize(
             feature_channels,
             codebook_size=codebook_size,
@@ -197,18 +223,26 @@ def main(
             separate_codebook_per_head=False,
             sample_codebook_temp=1.0,
             decay=0.90,
-            
         ).to(device)
 
-        model= DCTAutoencoderTransformer(
+        proc = DCTProcessor(channels=image_channels,
+                                  patch_size=patch_size,
+                                  dct_compression_factor=dct_compression_factor,
+                                  max_n_patches=max_n_patches,
+                                  max_seq_len=max_n_patches,
+                                  patch_norm_device=device)
+
+        model= DCTAutoencoder(
             vq_model,
             feature_channels=feature_channels,
             patch_size=patch_size,
-            dct_compression_factor=dct_compression_factor,
             max_n_patches=max_n_patches,
+            dct_processor=proc
         ).to(dtype).to(device)
-        model.encoder.patch_norm = model.encoder.patch_norm.to(torch.float32)
-        return model
+
+        model.dct_processor.patch_norm = model.dct_processor.patch_norm.to(torch.float32)
+
+        return model, proc
 
 
     codebook_size = 256
@@ -219,16 +253,11 @@ def main(
 #        for heads in head_numbers:
     for learning_rate in [1e-3]:
         for patch_size in [16]:
-            vq_autoencoder = get_vq_autoencoder(codebook_size, heads, patch_size)
+            autoencoder, processor = get_model(codebook_size, heads, patch_size)
 
-            dct_preproc = get_dct_preproc(vq_autoencoder)
             ds_train = load_and_transform_dataset(
-                image_dataset_path_or_url, dct_preproc=dct_preproc,
+                image_dataset_path_or_url, processor,
             )
-#            ds_test = load_and_transform_dataset(
-#                image_dataset_path_or_url, split="test", dct_preproc=dct_preproc,
-#            )
-
 
             run_d = dict(
                 codebook_size=codebook_size,
@@ -244,8 +273,8 @@ def main(
             if use_wandb:
                 wandb.init(project="vq-experiments", config=run_d)
 
-            vq_autoencoder = train(
-                vq_autoencoder,
+            autoencoder = train(
+                autoencoder,
                 ds_train,
                 device=device,
                 dtype=dtype,
@@ -253,7 +282,7 @@ def main(
                 use_wandb=use_wandb,
             )
 
-            vq_autoencoder = None
+            autoencoder = None
 
             if use_wandb:
                 wandb.finish()
