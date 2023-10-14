@@ -37,25 +37,30 @@ class PatchNorm(nn.Module):
     uses https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Welford's_online_algorithm
     to record estimates of mean and std
     """
-    def __init__(self, patch_height_dim: int, patch_width_dim: int, patch_dim:int, eps:float=1e-1):
+    def __init__(self, patch_height_dim: int, patch_width_dim: int, patch_dim:int, eps:float=1e-2, ema_alpha: float = 1e-1):
         super().__init__()
         self.eps=eps
         self.patch_dim = patch_dim
 
         self.n = nn.Parameter(torch.zeros(patch_height_dim,patch_width_dim,), requires_grad=False)
         self.mean = nn.Parameter(torch.zeros(patch_height_dim, patch_width_dim, patch_dim),requires_grad=False)
-        self.m2 = nn.Parameter(torch.zeros(patch_height_dim, patch_width_dim, patch_dim), requires_grad=False)
+        # initializes m2 at eps
+        self.m2 = nn.Parameter(torch.ones(patch_height_dim, patch_width_dim, patch_dim) * eps, requires_grad=False)
 
     @property
     def var(self):
         mask = self.n == 0
-        var = self.m2.clamp(self.eps, 1e6) / self.n.unsqueeze(-1).clamp(1.0)
+        var = self.m2 / self.n.unsqueeze(-1).clamp(1.0)
         var[mask] = 1.0
         return var
 
     @property
     def std(self):
         return self.var.sqrt()
+
+    @property
+    def dtype(self):
+        return self.mean.dtype
 
 
     def forward(self, patches: torch.Tensor, pos_h: torch.LongTensor, pos_w: torch.LongTensor, key_pad_mask: torch.BoolTensor):
@@ -65,6 +70,8 @@ class PatchNorm(nn.Module):
         patches should be (..., dim)
         """
         patches_shape = patches.shape
+        old_dtype = patches.dtype
+        patches = patches.to(self.dtype)
          
         # first masks based on the key_pad_mask
         # this is important because we don't want the patch statistics effected
@@ -78,23 +85,25 @@ class PatchNorm(nn.Module):
                 # updates n by incrementing all values at pos_h and pos_w
                 scatter_add_2d(self.n.unsqueeze(-1), pos_h, pos_w)
 
-
                 # updates the mean
                 delta = patches - self.mean[pos_h, pos_w]
                 scatter_add_2d(self.mean, pos_h, pos_w, delta / self.n[pos_h, pos_w, None])
 
                 delta2 = patches - self.mean[pos_h, pos_w]
                 scatter_add_2d(self.m2, pos_h, pos_w, delta * delta2)
+                self.m2.clamp_(self.eps, 1e7)
 
+        patches = (patches - self.mean[pos_h, pos_w]) / (self.std[pos_h, pos_w] + self.eps)
+        patches = patches.to(old_dtype)
 
-        patches = (patches - self.mean[pos_h, pos_w]) / self.std[pos_h, pos_w]
+        print("min ", patches.min().item(), "max", patches.max().item())
 
         out = torch.zeros(patches_shape, dtype=patches.dtype, device=patches.device)
         out[~key_pad_mask] = patches
         return out
 
     def inverse_norm(self, patches: torch.Tensor, pos_h: torch.LongTensor, pos_w: torch.LongTensor):
-        return patches * self.std[pos_h, pos_w] + self.mean[pos_h, pos_w]
+        return patches * (self.std[pos_h, pos_w] + self.eps) + self.mean[pos_h, pos_w]
 
 
 def exists(val):

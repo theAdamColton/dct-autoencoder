@@ -71,7 +71,7 @@ def train(
     log_every=2,
     n_log:int=10,
     max_steps=1e20,
-    warmup_steps=10,
+    warmup_steps=25,
     use_wandb: bool = False,
 ):
     optimizer = torch.optim.Adam(vq_autoencoder.parameters(), lr=1e-9)
@@ -94,6 +94,22 @@ def train(
             original_sizes = batch["original_sizes"]
             dct_features = [x.to(dtype).to(device) for x in dct_features]
 
+
+            if i % log_every == 0:
+                print("logging images ....")
+                vq_autoencoder.eval()
+                with torch.no_grad():
+                    with torch.autocast(device):
+                        out = vq_autoencoder(dct_features=dct_features[:n_log], original_sizes=original_sizes[:n_log], decode=True)
+                vq_autoencoder.train()
+                image = make_image_grid(out['x'], out['x_hat'], filename=f"{OUTDIR}/train image {i:04}.png")
+                log_d = {"train": dict(epoch=epoch, step=i, image=wandb.Image(image), pixel_loss=out['pixel_loss'].item(), rec_loss=out['rec_loss'].item())}
+                print("log:", log_d)
+
+                if use_wandb:
+                    wandb.log(log_d)
+
+
             with torch.autocast(device, dtype=dtype):
                 out = vq_autoencoder(dct_features=dct_features, original_sizes=original_sizes, decode=False)
 
@@ -106,7 +122,7 @@ def train(
             optimizer.step()
 
             print(
-                    f"epoch: {epoch} loss: {loss.item():.3f} rec_loss: {out['rec_loss'].item():.2f} commit_loss: {commit_loss.item():.2f} perpelxity: {out['perplexity'].item():.2f}"
+                    f"epoch: {epoch} loss: {loss.item():.3f} rec_loss: {out['rec_loss'].item():.2f} commit_loss: {commit_loss.item():.2f} perplexity: {out['perplexity'].item():.2f}"
             )
 
             if use_wandb:
@@ -122,21 +138,6 @@ def train(
                         )
                     }
                 )
-
-            if i % log_every == 0:
-                print("logging images ....")
-                vq_autoencoder.eval()
-                with torch.no_grad():
-                    dct_features, original_sizes = dct_features[:n_log], original_sizes[:n_log]
-                    with torch.autocast(device):
-                        out = vq_autoencoder(dct_features=dct_features, original_sizes=original_sizes, decode=True)
-                vq_autoencoder.train()
-                image = make_image_grid(out['x'], out['x_hat'], filename=f"{OUTDIR}/train image {i:04}.png")
-                log_d = {"train": dict(epoch=epoch, step=i, image=wandb.Image(image), pixel_loss=out['pixel_loss'].item(), rec_loss=out['rec_loss'].item())}
-                print("logging:", log_d)
-
-                if use_wandb:
-                    wandb.log(log_d)
 
             if n_steps > max_steps:
                 return vq_autoencoder
@@ -197,15 +198,18 @@ def main(
             sample_codebook_temp=1.0,
             decay=0.90,
             
-        ).to(dtype).to(device)
+        ).to(device)
 
-        return DCTAutoencoderTransformer(
+        model= DCTAutoencoderTransformer(
             vq_model,
             feature_channels=feature_channels,
             patch_size=patch_size,
             dct_compression_factor=dct_compression_factor,
             max_n_patches=max_n_patches,
         ).to(dtype).to(device)
+        model.encoder.patch_norm = model.encoder.patch_norm.to(torch.float32)
+        return model
+
 
     codebook_size = 256
     heads = 16
@@ -213,7 +217,7 @@ def main(
 
 #    for codebook_size in codebook_sizes:
 #        for heads in head_numbers:
-    for learning_rate in [3e-3]:
+    for learning_rate in [1e-3]:
         for patch_size in [16]:
             vq_autoencoder = get_vq_autoencoder(codebook_size, heads, patch_size)
 
