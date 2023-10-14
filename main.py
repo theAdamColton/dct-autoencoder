@@ -108,7 +108,7 @@ def train(
         print(f"{i:03} mean {mean:.2f} std {std:.2f} min {_min:.2f} max {_max:.2f}")
 
     autoencoder.dct_processor.patch_norm.frozen = True
-    autoencoder.dct_processor.patch_norm.dtype = dtype
+    autoencoder.dct_processor.patch_norm = autoencoder.dct_processor.patch_norm.to(dtype)
     print("done training norm")
 
     for epoch_i, epoch in enumerate(range(epochs)):
@@ -125,51 +125,50 @@ def train(
             with torch.no_grad():
                 batch.patches = autoencoder.dct_processor.patch_norm.forward(batch.patches, batch.h_indices, batch.w_indices, batch.key_pad_mask)
 
-            if i % log_every == 0:
-                print("logging images ....")
-                autoencoder.eval()
-                log_batch = DCTPatches(
-                        batch.patches[:n_log],
-                        batch.key_pad_mask[:n_log],
-                        batch.h_indices[:n_log],
-                        batch.w_indices[:n_log],
-                        batch.attn_mask[:n_log],
-                        batch.batched_image_ids[:n_log],
-                        batch.patch_positions[:n_log],
-                        batch.has_token_dropout,
-                        batch.original_sizes,
-                )
-                with torch.no_grad():
-                    with torch.autocast(device):
-                        out = autoencoder(
-                            log_batch,
-                            decode=True,
-                        )
-                autoencoder.train()
-                image = make_image_grid(
-                    out["x"], out["x_hat"], filename=f"{OUTDIR}/train image {i:04}.png"
-                )
-                log_d = {
-                    "train": dict(
-                        epoch=epoch,
-                        step=i,
-                        image=wandb.Image(image),
-                        pixel_loss=out["pixel_loss"].item(),
-                        rec_loss=out["rec_loss"].item(),
-                    )
-                }
-                print("log:", log_d)
-
-                if use_wandb:
-                    wandb.log(log_d)
+#            if i % log_every == 0:
+#                print("logging images ....")
+#                autoencoder.eval()
+#                log_batch = DCTPatches(
+#                        batch.patches[:n_log],
+#                        batch.key_pad_mask[:n_log],
+#                        batch.h_indices[:n_log],
+#                        batch.w_indices[:n_log],
+#                        batch.attn_mask[:n_log],
+#                        batch.batched_image_ids[:n_log],
+#                        batch.patch_positions[:n_log],
+#                        batch.has_token_dropout,
+#                        batch.original_sizes,
+#                )
+#                with torch.no_grad():
+#                    out = autoencoder(
+#                        log_batch,
+#                        decode=True,
+#                    )
+#                autoencoder.train()
+#                image = make_image_grid(
+#                    out["x"], out["x_hat"], filename=f"{OUTDIR}/train image {i:04}.png"
+#                )
+#                log_d = {
+#                    "train": dict(
+#                        epoch=epoch,
+#                        step=i,
+#                        image=wandb.Image(image),
+#                        pixel_loss=out["pixel_loss"].item(),
+#                        rec_loss=out["rec_loss"].item(),
+#                    )
+#                }
+#                print("log:", log_d)
+#
+#                if use_wandb:
+#                    wandb.log(log_d)
+#                out = None
 
             optimizer.zero_grad()
 
-            with torch.autocast(device, dtype=dtype):
-                out = autoencoder(
-                    batch,
-                    decode=False,
-                )
+            out = autoencoder(
+                batch,
+                decode=False,
+            )
 
             commit_loss = out["commit_loss"]
 
@@ -239,7 +238,7 @@ def load_and_transform_dataset(
 def main(
     image_dataset_path_or_url="imagenet-1k",
     device="cuda",
-    dtype=torch.bfloat16,
+    dtype=torch.float32,
     batch_size: int = 32,
     use_wandb: bool = False,
     train_norm_iters: int = 10,
@@ -247,9 +246,9 @@ def main(
     feature_channels: int = 768
     mlp_dim: int = 1024
     image_channels: int = 3
-    dct_compression_factor = 0.75
-    max_n_patches = 64
-    max_seq_len = 80
+    dct_compression_factor = 0.50
+    max_n_patches = 128
+    max_seq_len = 160
     max_batch_size = batch_size
     depth = 4
 
@@ -294,10 +293,6 @@ def main(
             .to(device)
         )
 
-        model.dct_processor.patch_norm = model.dct_processor.patch_norm.to(
-            torch.float32
-        )
-
         model.vq_model = model.vq_model.to(torch.float32)
 
         return model, proc
@@ -307,7 +302,7 @@ def main(
     #    for codebook_size in codebook_sizes:
     #        for heads in head_numbers:
     for learning_rate in [5e-4]:
-        for patch_size in [8]:
+        for patch_size in [16]:
             heads = patch_size * 2
             autoencoder, processor = get_model(codebook_size, heads, patch_size)
 

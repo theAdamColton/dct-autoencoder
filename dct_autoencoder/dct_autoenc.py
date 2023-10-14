@@ -2,6 +2,7 @@ from typing import List
 import torch.nn.functional as F
 import torch
 import torch.nn as nn
+from x_transformers import Encoder
 
 from .dct_processor import DCTPatches, DCTProcessor
 from .na_vit import NaViT, FeedForward
@@ -22,6 +23,7 @@ class DCTAutoencoder(nn.Module):
         max_n_patches: int = 512,
         dct_processor: DCTProcessor = None,
         codebook_size: int = None,
+        pos_embed_before_proj: bool = True,
     ):
         """
         input_res: the square integer input resolution size.
@@ -33,10 +35,6 @@ class DCTAutoencoder(nn.Module):
         self.feature_channels = feature_channels
         self.max_n_patches = max_n_patches
 
-        self.vq_norm_in = nn.Sequential(
-            nn.LayerNorm(feature_channels),
-            nn.GELU(),
-        )
         self.vq_norm_out = nn.Sequential(
             nn.LayerNorm(feature_channels),
             nn.GELU(),
@@ -49,17 +47,45 @@ class DCTAutoencoder(nn.Module):
             nn.Linear(feature_channels, image_channels * patch_size**2),
         )
 
-        self.encoder = NaViT(
-            image_size=max_n_patches * patch_size,
-            patch_size=patch_size,
-            dim=feature_channels,
-            depth=depth,
-            heads=8,
-            channels=image_channels,
-            mlp_dim=mlp_dim,
-            dropout=0.1,
-            emb_dropout=0.1,
+#        self.encoder = NaViT(
+#            image_size=max_n_patches * patch_size,
+#            patch_size=patch_size,
+#            dim=feature_channels,
+#            depth=depth,
+#            heads=8,
+#            channels=image_channels,
+#            mlp_dim=mlp_dim,
+#            dropout=0.1,
+#            emb_dropout=0.1,
+#        )
+
+        patch_dim = image_channels * (patch_size**2)
+
+        self.to_patch_embedding = nn.Sequential(
+            nn.Linear(patch_dim, feature_channels),
+            nn.LayerNorm(feature_channels),
+            nn.GELU(),
         )
+
+        pos_dim = patch_dim if pos_embed_before_proj else feature_channels
+        self.pos_embed_before_proj = pos_embed_before_proj
+        self.pos_embed_height = nn.Parameter(torch.zeros(max_n_patches, pos_dim))
+        self.pos_embed_width = nn.Parameter(torch.zeros(max_n_patches, pos_dim))
+
+        self.encoder = Encoder(
+                dim=feature_channels,
+                depth=depth,
+                heads=32,
+                attn_flash = True,
+                use_rmsnorm = True,
+                ff_glu = True,
+                ff_no_bias = True,
+                attn_one_kv_head = True,
+                sandwich_norm = True,
+                attn_qk_norm = True,
+                attn_qk_norm_dim_scale = True,
+            )
+        
 
         self.vq_model = vq_model
 
@@ -82,29 +108,48 @@ class DCTAutoencoder(nn.Module):
 
         dct_normalized_patches = dct_patches.patches.clone()
 
-        dct_patches = self.encoder(dct_patches)
-        z = dct_patches.patches
+        assert not dct_patches.patches.isnan().any().item()
+
+        # possibly adds pos embedding info before projecting in
+        if self.pos_embed_before_proj:
+            h_pos = self.pos_embed_height[dct_patches.h_indices].norm(dim=-1, keepdim=True)
+            w_pos = self.pos_embed_width[dct_patches.w_indices].norm(dim=-1, keepdim=True)
+
+            dct_patches.patches = dct_patches.patches + h_pos + w_pos
+            dct_patches.patches = self.to_patch_embedding(dct_patches.patches)
+        else:
+            dct_patches.patches = self.to_patch_embedding(dct_patches.patches)
+            h_pos = self.pos_embed_height[dct_patches.h_indices].norm(dim=-1, keepdim=True)
+            w_pos = self.pos_embed_width[dct_patches.w_indices].norm(dim=-1, keepdim=True)
+
+            dct_patches.patches = dct_patches.patches + h_pos + w_pos
+
+        #print("patch statistics:", dct_patches.patches.max().item(), dct_patches.patches.min().item(), dct_patches.patches.mean().item(), dct_patches.patches.std().item(), dct_patches.patches.dtype)
+    
+
+        # X-Transformers uses ~attn_mask
+        dct_patches.patches = self.encoder(dct_patches.patches, attn_mask=~dct_patches.attn_mask)
+
+        assert not dct_patches.patches.isnan().any().item()
 
         mask = ~dct_patches.key_pad_mask
-
-        z = self.vq_norm_in(z)
 
         # TODO figure out how to make the mask work
         # with the vq model, because it effects the codebook
         # update
-        z = z.to(torch.float32)
-        z, codes, commit_loss = self.vq_model(z)#, mask=mask)
-        z = z.to(dct_normalized_patches.dtype)
+        dct_patches.patches = dct_patches.patches.to(torch.float32)
+        dct_patches.patches, codes, commit_loss = self.vq_model(dct_patches.patches)#, mask=mask)
+        dct_patches.patches = dct_patches.patches.to(dct_normalized_patches.dtype)
 
-        z = self.vq_norm_out(z)
+        dct_patches.patches = self.vq_norm_out(dct_patches.patches)
 
         with torch.no_grad():
             perplexity = calculate_perplexity(codes[mask], self.codebook_size)
 
-        z = self.proj_out(z)
+        dct_patches.patches = self.proj_out(dct_patches.patches)
 
         # loss between z and normalized patches
-        rec_loss = F.mse_loss(z[mask], dct_normalized_patches[mask])
+        rec_loss = F.mse_loss(dct_patches.patches[mask], dct_normalized_patches[mask])
 
         if not decode:
             return dict(
@@ -114,7 +159,6 @@ class DCTAutoencoder(nn.Module):
                 codes=codes,
             )
 
-        dct_patches.patches = z
         images_hat = self.dct_processor.postprocess(dct_patches)
 
         dct_patches.patches = dct_normalized_patches

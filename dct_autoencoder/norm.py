@@ -39,12 +39,10 @@ class PatchNorm(nn.Module):
         patch_width_dim: int,
         patch_dim: int,
         eps: float = 1e-3,
-        dtype = torch.float32,
     ):
         super().__init__()
         self.eps = eps
         self.patch_dim = patch_dim
-        self.dtype = dtype
 
         self.n = nn.Parameter(
             torch.zeros(
@@ -90,8 +88,6 @@ class PatchNorm(nn.Module):
         patches should be (..., dim)
         """
         patches_shape = patches.shape
-        old_dtype = patches.dtype
-        patches = patches.to(self.dtype)
 
         # first masks based on the key_pad_mask
         # this is important because we don't want the patch statistics effected
@@ -118,7 +114,6 @@ class PatchNorm(nn.Module):
         patches = (patches - self.mean[pos_h, pos_w]) / (
             self.std[pos_h, pos_w] + self.eps
         )
-        patches = patches.to(old_dtype)
 
         out = torch.zeros(patches_shape, dtype=patches.dtype, device=patches.device)
         out[~key_pad_mask] = patches
