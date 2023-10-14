@@ -59,7 +59,7 @@ class DCTProcessor:
         self.max_res = patch_size * max_n_patches
         self.max_seq_len = max_seq_len
         self.patch_norm = PatchNorm(
-            patch_size, patch_size, patch_size**2 * channels
+            max_n_patches, max_n_patches, patch_size**2 * channels
         ).to(patch_norm_device)
 
         # what percent of tokens to dropout

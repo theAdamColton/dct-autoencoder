@@ -17,6 +17,7 @@ class DCTAutoencoder(nn.Module):
         image_channels: int = 3,
         depth: int = 4,
         feature_channels: int = 1024,
+        mlp_dim:int = 2048,
         patch_size: int = 32,
         max_n_patches: int = 512,
         dct_processor: DCTProcessor = None,
@@ -30,7 +31,6 @@ class DCTAutoencoder(nn.Module):
         self.patch_size = patch_size
         self.feature_channels = feature_channels
         self.max_n_patches = max_n_patches
-        mlp_dim = 2048
 
         self.vq_norm_in = nn.Sequential(
             nn.LayerNorm(feature_channels),
@@ -65,6 +65,7 @@ class DCTAutoencoder(nn.Module):
 
     def forward(
         self,
+        # normalized dct patches
         dct_patches: DCTPatches = None,
         pixel_values: List[torch.Tensor] = None,
         decode: bool = False,
@@ -74,9 +75,9 @@ class DCTAutoencoder(nn.Module):
 
         dct_normalized_patches = dct_patches.patches.clone()
 
-        z = self.encoder(dct_patches).patches
-
+        dct_patches = self.encoder(dct_patches)
         z = dct_patches.patches
+
         mask = ~dct_patches.key_pad_mask
 
         # z = self.vq_norm_in(z)

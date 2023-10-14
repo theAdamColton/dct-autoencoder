@@ -122,8 +122,6 @@ class PatchNorm(nn.Module):
         )
         patches = patches.to(old_dtype)
 
-        print("min ", patches.min().item(), "max", patches.max().item())
-
         out = torch.zeros(patches_shape, dtype=patches.dtype, device=patches.device)
         out[~key_pad_mask] = patches
         return out

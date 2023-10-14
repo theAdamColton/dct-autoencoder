@@ -13,7 +13,7 @@ import time
 import json
 import wandb
 
-from dct_autoencoder.dct_processor import DCTProcessor
+from dct_autoencoder.dct_processor import DCTPatches, DCTProcessor
 from dct_autoencoder.dct_autoenc import DCTAutoencoder
 
 OUTDIR = f"out/{time.ctime()}/"
@@ -70,11 +70,11 @@ def train(
     epochs: int = 1,
     device="cuda",
     dtype=torch.bfloat16,
-    log_every=2,
+    log_every=10,
     n_log: int = 10,
     max_steps=1e20,
     warmup_steps=25,
-    train_norm_iters: int = 50,  # number of iterations to train the norm layer
+    train_norm_iters: int = 10,  # number of iterations to train the norm layer
     use_wandb: bool = False,
 ):
     optimizer = torch.optim.Adam(autoencoder.parameters(), lr=1e-9)
@@ -95,42 +95,51 @@ def train(
 
     print("training norms")
     for i, batch in enumerate(tqdm(dataloader)):
+        if i > train_norm_iters:
+            break
         batch = batch.to(device)
         normalized_patches = autoencoder.dct_processor.patch_norm.forward(
             batch.patches, batch.h_indices, batch.w_indices, batch.key_pad_mask
         )
-        mean = torch.stack([x.mean() for x in normalized_patches]).mean()
-        std = torch.stack([x.std() for x in normalized_patches]).std()
-        print(f"{i:03} mean {mean:.2f} std {std:.2f}")
+        mean = normalized_patches[~batch.key_pad_mask].mean() .item()
+        std = normalized_patches[~batch.key_pad_mask].std()   .item()
+        _min = normalized_patches[~batch.key_pad_mask].min()  .item()
+        _max = normalized_patches[~batch.key_pad_mask].max()  .item()
+        print(f"{i:03} mean {mean:.2f} std {std:.2f} min {_min:.2f} max {_max:.2f}")
 
     autoencoder.dct_processor.patch_norm.frozen = True
     print("done training norm")
 
     for epoch_i, epoch in enumerate(range(epochs)):
-        train_ds = train_ds.shuffle(1000)
+        train_ds = train_ds.shuffle(5000)
         dataloader = get_dataloader()
         for i, batch in enumerate(tqdm(dataloader)):
             if epoch_i == 0 and i < warmup_steps:
                 for g in optimizer.param_groups:
                     g["lr"] = ((i + 1) / warmup_steps) * learning_rate
 
-            optimizer.zero_grad()
-
-            import bpdb
-
-            bpdb.set_trace()
-            dct_features = batch["dct_features"]
-            original_sizes = batch["original_sizes"]
-            dct_features = [x.to(dtype).to(device) for x in dct_features]
+            batch = batch.to(device)
+            # normalizes 
+            batch.patches = autoencoder.dct_processor.patch_norm.forward(batch.patches, batch.h_indices, batch.w_indices, batch.key_pad_mask)
 
             if i % log_every == 0:
                 print("logging images ....")
                 autoencoder.eval()
+                log_batch = DCTPatches(
+                        batch.patches[:n_log],
+                        batch.key_pad_mask[:n_log],
+                        batch.h_indices[:n_log],
+                        batch.w_indices[:n_log],
+                        batch.attn_mask[:n_log],
+                        batch.batched_image_ids[:n_log],
+                        batch.patch_positions[:n_log],
+                        batch.has_token_dropout,
+                        batch.original_sizes,
+                )
                 with torch.no_grad():
                     with torch.autocast(device):
                         out = autoencoder(
-                            dct_features=dct_features[:n_log],
-                            original_sizes=original_sizes[:n_log],
+                            log_batch,
                             decode=True,
                         )
                 autoencoder.train()
@@ -151,10 +160,11 @@ def train(
                 if use_wandb:
                     wandb.log(log_d)
 
+            optimizer.zero_grad()
+
             with torch.autocast(device, dtype=dtype):
                 out = autoencoder(
-                    dct_features=dct_features,
-                    original_sizes=original_sizes,
+                    batch,
                     decode=False,
                 )
 
@@ -232,8 +242,8 @@ def main(
 ):
     feature_channels: int = 1024
     image_channels: int = 3
-    dct_compression_factor = 0.75
-    max_n_patches = 128
+    dct_compression_factor = 0.55
+    max_n_patches = 144
 
     def get_model(codebook_size, heads, patch_size):
         vq_model = vector_quantize_pytorch.VectorQuantize(
@@ -282,7 +292,7 @@ def main(
 
     #    for codebook_size in codebook_sizes:
     #        for heads in head_numbers:
-    for learning_rate in [1e-3]:
+    for learning_rate in [1e-4, 5e-4, 1e-3, 3e-3]:
         for patch_size in [16]:
             autoencoder, processor = get_model(codebook_size, heads, patch_size)
 
