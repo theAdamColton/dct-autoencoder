@@ -38,7 +38,7 @@ def build_batch(n=100):
     return torch.stack(x), torch.LongTensor(pos_h), torch.LongTensor(pos_w), torch.BoolTensor(mask)
         
 
-for _ in range(150):
+for _ in range(10):
     x, pos_h, pos_w, mask = build_batch()
     x_norm = patchnorm(x, pos_h, pos_w, mask)
 

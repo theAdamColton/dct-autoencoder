@@ -150,19 +150,32 @@ class DCTProcessor:
             self.calc_token_dropout = lambda height, width: token_dropout_prob
 
     @torch.no_grad()
+    def _transform_image_in(self, x):
+        return dct2(x, 'ortho')
+
+    @torch.no_grad()
+    def _transform_image_out(self, x):
+        return idct2(x, 'ortho')
+
+    @torch.no_grad()
     def preprocess(self, x: List[torch.Tensor]):
         """
         preprocess but don't batch
         """
         cropped_ims = []
+        patch_sizes = []
         original_sizes = []
         for im in x:
-            cropped_im = self._crop_image(im)
-            cropped_im = dct2(cropped_im, 'ortho')
+            im = self._transform_image_in(im)
+            c,h,w = im.shape
+            original_sizes.append((h,w))
 
-            c,h,w = cropped_im.shape
-            ph, pw = h // self.patch_size, w//self.patch_size
-            original_sizes.append((ph, pw))
+            cropped_im = self._crop_image(im)
+            c,ch,cw = cropped_im.shape
+
+
+            ph, pw = ch // self.patch_size, cw//self.patch_size
+            patch_sizes.append((ph, pw))
             cropped_ims.append(cropped_im)
 
         patched_ims = []
@@ -172,15 +185,15 @@ class DCTProcessor:
             patched_ims.append(patches)
             positions.append(pos)
 
-        return patched_ims, positions, original_sizes
+        return patched_ims, positions, original_sizes, patch_sizes
 
     @torch.no_grad()
-    def batch(self, patches: List[torch.Tensor], positions: List[torch.Tensor], original_sizes: List[Tuple[int,int]]) -> DCTPatches:
+    def batch(self, patches: List[torch.Tensor], positions: List[torch.Tensor], original_sizes: List[Tuple[int,int]], patch_sizes: List[Tuple[int, int]]) -> DCTPatches:
         """
         batch the result of preprocess
         """
         patches, positions = self._group_patches_by_max_seq_len(patches, positions)
-        return self._batch_groups(patches, positions, original_sizes=original_sizes)
+        return self._batch_groups(patches, positions, original_sizes=original_sizes, patch_sizes=patch_sizes)
 
 
     @torch.no_grad()
@@ -190,8 +203,17 @@ class DCTProcessor:
         """
         dct_images = self.revert_patching(x)
         images = []
-        for image in dct_images:
-            images.append(idct2(image))
+        for image, (h, w) in zip(dct_images, x.original_sizes):
+            ch, cw = image.shape[-2:]
+
+            im_pad = torch.zeros(self.channels, h, w, device=image.device, dtype=image.dtype)
+
+            im_pad[:, :ch, :cw] = image
+
+            im_pad = self._transform_image_out(im_pad)
+
+            images.append(im_pad)
+
         return images
 
     def _get_crop_dims(self, h:int, w:int):
@@ -273,11 +295,13 @@ class DCTProcessor:
         # takes the top p closest distances
         p = self.dct_compression_factor
         _, indices_flat = tri_distances.view(-1).sort()
-        k = int(len(indices_flat) * p)
+        k = round(len(indices_flat) * p)
+        k = max(1, k)
+        k = min(len(indices_flat), k)
         indices_flat = indices_flat[:k]
 
-        # patches x into a 2d list of patches
-        x = rearrange(x, "c (h p1) (w p2) -> (h w) (c p1 p2)", p1=self.patch_size, p2=self.patch_size)
+        # patches x into a list of patches
+        x = rearrange(x, "c (h p1) (w p2) -> (h w) (c p1 p2)", p1=self.patch_size, p2=self.patch_size, c = self.channels)
 
 
         # takes top k patches, and their indices
@@ -453,22 +477,15 @@ class DCTProcessor:
                 image_mask = (image_ids == image_id) & ~mask
                 image_tokens = x[batch_i, image_mask, :]
                 image_positions = positions[image_mask]
-                h, w = output.original_sizes[len(images)]
+                ph, pw = output.patch_sizes[len(images)]
 
-                image = torch.zeros(h, w, z, dtype=x.dtype, device=x.device)
+                image = torch.zeros(ph, pw, z, dtype=x.dtype, device=x.device)
 
                 for token, pos in zip(image_tokens, image_positions):
                     pos_h,pos_w = pos.unbind(-1)
                     image[pos_h, pos_w, :] = token 
 
-                #image = rearrange(
-                #    image_tokens,
-                #    "(h w) (c p1 p2) -> c (h p1) (w p2)",
-                #    p1=self.patch_size,
-                #    p2=self.patch_size,
-                #    w=w,
-                #    h=h,
-                #)
+                image = rearrange(image.view(ph*pw, -1), '(ph pw) (c p1 p2) -> c (ph p1) (pw p2)', p1=self.patch_size, p2=self.patch_size, c=self.channels, ph=ph, pw=pw)
                 images.append(image)
 
         return images
