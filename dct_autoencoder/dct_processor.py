@@ -1,3 +1,73 @@
+"""
+-------- Preprocessing pipeline -----------
+
+image Shape: (c, h, w)
+
+| dct2d
+v
+
+image dct Shape: (c, h, w)
+
+| rearrange
+v
+
+image of dct patches Shape: (ph, pw, pz), where pz = (c * patchsize ** 2)
+
+| distance threshold, 
+| take the top p closest patches
+| to the top left corner
+v
+
+flattened image Shape: (s, pz) where s = int(ph * pw * p)
+patch positions
+
+|||||||| collate patches into batches by padding and packing
+vvvvvvvv
+
+patches Shape: (b, s, pz)
+original patch positions: (b, s, 2)
+image indices: (b, s)
+
+|||||||| normalize patches based on patch positions
+vvvvvvvv
+
+normalized patches Shape: (b, s, pz)
+original patch positions: (b, s, 2)
+image indices: (b, s)
+
+
+
+
+-------- Postprocessing pipeline ----------
+
+
+normalized patches Shape: (b, s, pz)
+original patch positions: (b, s, 2)
+image indices: (b, s)
+
+|||||||| de normalize patches based on patch positions
+vvvvvvvv
+
+patches Shape: (b, s, pz)
+original patch positions: (b, s, 2)
+image indices: (b, s)
+
+| Un-collate patches by placing patches into a zeroed tensor
+| using their stored patch positions and image indices
+v
+
+2d image of dct patches Shape: (ph, pw, pz)
+
+| 2d dct image Shape: (c, h, w)
+v
+
+| idct2
+v
+
+2d image Shape: (c, h, w)
+
+
+"""
 from dataclasses import dataclass
 from typing import List, Tuple
 from functools import partial
@@ -27,7 +97,9 @@ class DCTPatches:
     attn_mask: torch.BoolTensor
     batched_image_ids: torch.LongTensor
     patch_positions: torch.LongTensor
-    has_token_dropout: bool
+    # ph, pw of the patches
+    patch_sizes: List[Tuple]
+    # h,w of the original image pixels
     original_sizes: List[Tuple]
 
     def to(self, what):
@@ -78,79 +150,68 @@ class DCTProcessor:
             self.calc_token_dropout = lambda height, width: token_dropout_prob
 
     @torch.no_grad()
-    def __call__(self, x):
-        return self.preprocess(x)
+    def preprocess(self, x: List[torch.Tensor]):
+        """
+        preprocess but don't batch
+        """
+        cropped_ims = []
+        original_sizes = []
+        for im in x:
+            cropped_im = self._crop_image(im)
+            cropped_im = dct2(cropped_im, 'ortho')
+
+            c,h,w = cropped_im.shape
+            ph, pw = h // self.patch_size, w//self.patch_size
+            original_sizes.append((ph, pw))
+            cropped_ims.append(cropped_im)
+
+        patched_ims = []
+        positions = []
+        for cropped_im in cropped_ims:
+            patches, pos = self._patch_image(cropped_im)
+            patched_ims.append(patches)
+            positions.append(pos)
+
+        return patched_ims, positions, original_sizes
 
     @torch.no_grad()
-    def preprocess(self, x: List[torch.Tensor]) -> DCTPatches:
-        dct_images = []
-        all_original_sizes = []
+    def batch(self, patches: List[torch.Tensor], positions: List[torch.Tensor], original_sizes: List[Tuple[int,int]]) -> DCTPatches:
+        """
+        batch the result of preprocess
+        """
+        patches, positions = self._group_patches_by_max_seq_len(patches, positions)
+        return self._batch_groups(patches, positions, original_sizes=original_sizes)
 
-        for im in x:
-            im_dct, original_sizes = self.image_to_dct(im)
-            dct_images.append(im_dct)
-            all_original_sizes.append(original_sizes)
-
-        dct_patches = self.patch_images(dct_images)
-        dct_patches.original_sizes = all_original_sizes
-        dct_patches.patches = self.patch_norm(
-            dct_patches.patches, dct_patches.h_indices, dct_patches.w_indices
-        )
-        return dct_patches
 
     @torch.no_grad()
     def postprocess(self, x: DCTPatches) -> List[torch.Tensor]:
-        x.patches = self.patch_norm.inverse_norm(x.patches, x.h_indices, x.w_indices)
+        """
+        return a list of images
+        """
         dct_images = self.revert_patching(x)
+        images = []
+        for image in dct_images:
+            images.append(idct2(image))
+        return images
 
-        if x.original_sizes is None:
-            original_sizes = [im.shape[-2:] for im in dct_images]
-        else:
-            original_sizes = x.original_sizes
-
-        ims = []
-        for im, (h, w) in zip(dct_images, original_sizes):
-            c, ih, iw = im.shape
-            padded = torch.zeros(c, h, w, device=im.device, dtype=im.dtype)
-            padded[:, :ih, :iw] = im
-            im = padded
-
-            im = idct2(im.detach().float().cpu(), "ortho")
-            ims.append(im)
-        return ims
-
-    @torch.no_grad()
-    def image_to_dct(self, x: torch.Tensor):
-        """
-        not batchable
-        """
-        # TODO take features that are closer to 0,0
-        # rather than a rectangle
-        c, h, w = x.shape
-
-        assert c == self.channels
+    def _get_crop_dims(self, h:int, w:int):
         assert h >= self.patch_size
         assert w >= self.patch_size
 
-        x_dct = dct2(x, "ortho")
-
-        h_c, w_c = (1 - self.dct_compression_factor) * h, (
-            1 - self.dct_compression_factor
-        ) * w
-
-        p_h = round(h_c / self.patch_size)
-        p_w = round(w_c / self.patch_size)
+        # p_h, p_w, number of patches in height and width
+        p_h = int(h / self.patch_size)
+        p_w = int(w / self.patch_size)
         p_h = max(p_h, 1)
         p_w = max(p_w, 1)
 
-        # we need that
+        # crops p_h and p_w to p_h_c and p_w_c such that
         # ar = p_h_c / p_w_c = p_h / p_w
         # p_h_c * p_w_c <= self.max_n_patches
+        #
         # ar * p_w_c <= self.max_n_patches / p_w_c
         # ar * p_w_c ** 2 <= self.max_n_patches
         # p_w_c = sqrt(self.max_n_patches / ar)
         # p_h_c = ar * p_w_c
-
         ar = p_h / p_w
         p_w_c = int((self.max_n_patches / ar) ** 0.5)
         p_h_c = int(ar * p_w_c)
@@ -162,135 +223,171 @@ class DCTProcessor:
         p_h = max(p_h, 1)
         p_w = max(p_w, 1)
 
-        dct_h = p_h * self.patch_size
-        dct_w = p_w * self.patch_size
+        # crop height and crop width
+        c_h = p_h * self.patch_size
+        c_w = p_w * self.patch_size
 
-        assert dct_h % self.patch_size == 0
-        assert dct_w % self.patch_size == 0
-        assert dct_h <= self.max_res
-        assert dct_w <= self.max_res
-        assert dct_h >= self.patch_size
-        assert dct_w >= self.patch_size
+        assert c_h % self.patch_size == 0
+        assert c_w % self.patch_size == 0
+        assert c_h <= h
+        assert c_w <= w
+        assert c_h <= self.max_res
+        assert c_w <= self.max_res
+        assert c_h >= self.patch_size
+        assert c_w >= self.patch_size
 
-        x_dct = x_dct[..., :dct_h, :dct_w]
+        return c_h, c_w
 
-        return x_dct, (h, w)
 
-    def group_images_by_max_seq_len(
-        self,
-        images: List[Tensor],
-    ) -> List[List[Tensor]]:
-        calc_token_dropout = default(self.calc_token_dropout, always(0.0))
+    @torch.no_grad()
+    def _crop_image(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        not batchable
 
+        takes an input image x,
+        and crops it such that the height and width are both divisible by patch
+        size
+        """
+        c, h, w = x.shape
+
+        assert c == self.channels
+        c_h, c_w = self._get_crop_dims(h,w)
+        x = x[:, :c_h, :c_w]
+
+        return x
+
+    @torch.no_grad()
+    def _patch_image(self, x: torch.Tensor):
+        _, h, w = x.shape
+
+        assert h % self.patch_size == 0
+        assert w % self.patch_size == 0
+
+        ph, pw = h//self.patch_size, w//self.patch_size
+
+        h_indices, w_indices = torch.meshgrid(torch.arange(ph), torch.arange(pw))
+
+        # distances from upper left corner
+        tri_distances = (h_indices + w_indices) * 1.0
+
+        # takes the top p closest distances
+        p = self.dct_compression_factor
+        _, indices_flat = tri_distances.view(-1).sort()
+        k = int(len(indices_flat) * p)
+        indices_flat = indices_flat[:k]
+
+        # patches x into a 2d list of patches
+        x = rearrange(x, "c (h p1) (w p2) -> (h w) (c p1 p2)", p1=self.patch_size, p2=self.patch_size)
+
+
+        # takes top k patches, and their indices
+        x = x[indices_flat,:]
+        h_indices = h_indices.flatten()[indices_flat]
+        w_indices = w_indices.flatten()[indices_flat]
+
+        s, z = x.shape
+        assert z == self.channels * self.patch_size ** 2, f"{z} != {self.channels * self.patch_size ** 2}"
+        assert s == k
+
+        # x is shape c, k
+        # h_indices is shape k
+        # w_indices is shape k
+        pos = torch.stack([h_indices, w_indices], dim=-1)
+        return x, pos 
+
+    @torch.no_grad()
+    def _group_patches_by_max_seq_len(
+            self,
+            batched_patches: List[Tensor],
+            batched_positions: List[Tensor],
+            ) -> Tuple[List[List[Tensor]], List[List[Tensor]]]:
+        """
+        converts a list of ungrouped flattened patches
+        into batched groups, such that the total number of batches is less than
+        self.max_batch_size and the length of any sequence of the batches is less than
+        self.max_seq_len.
+        """
         groups = []
+        groups_pos = []
         group = []
+        group_pos = []
         seq_len = 0
 
-        if isinstance(calc_token_dropout, (float, int)):
-            calc_token_dropout = always(calc_token_dropout)
 
-        for i, image in enumerate(images):
-            assert isinstance(image, Tensor)
+        for i, (patches, pos) in enumerate(zip(batched_patches, batched_positions)):
+            assert isinstance(patches, Tensor)
 
-            image_dims = image.shape[-2:]
-            ph, pw = map(lambda t: t // self.patch_size, image_dims)
-
-            image_seq_len = ph * pw
-            image_seq_len = int(image_seq_len * (1 - calc_token_dropout(*image_dims)))
+            k, _ = patches.shape
 
             assert (
-                image_seq_len <= self.max_seq_len
-            ), f"image with dimensions {image_dims} exceeds maximum sequence length"
+            k <= self.max_n_patches and k <= self.max_seq_len
+            ), f"patch with len {k} exceeds maximum sequence length"
 
-            if (seq_len + image_seq_len) > self.max_seq_len:
+            if (seq_len + k) > self.max_seq_len:
                 groups.append(group)
+                groups_pos.append(group_pos)
                 group = []
+                group_pos = []
                 seq_len = 0
 
-            group.append(image)
-            seq_len += image_seq_len
+            group.append(patches)
+            group_pos.append(pos)
+            seq_len += k
 
             if len(groups) >= self.max_batch_size:
-                print(f"Warning! Truncating {len(images) - i + 1} images from batch to reach batch size of {self.max_batch_size}")
+                print(f"Warning! Truncating {len(batched_patches) - i + 1} images from batch to reach batch size of {self.max_batch_size}")
 
         if len(group) > 0:
             groups.append(group)
+            groups_pos.append(group_pos)
 
-        return groups
+        return groups, groups_pos
 
     @torch.no_grad()
-    def patch_images(
-        self,
-        batched_images: List[Tensor],
-        original_sizes=None,
-    ) -> DCTPatches:
-        p, c, device, has_token_dropout = (
+    def _batch_groups(self,
+               grouped_batched_patches: List[List[Tensor]],
+               grouped_batched_positions: List[List[Tensor]],
+               **dct_patch_kwargs,
+                      ) -> DCTPatches:
+        """
+        returns a batch of DCTPatches
+        """
+        p, c, device = (
             self.patch_size,
             self.channels,
             torch.device("cpu"),
-            exists(self.calc_token_dropout),
         )
 
         arange = partial(torch.arange, device=device)
         pad_sequence = partial(orig_pad_sequence, batch_first=True)
 
-        # auto pack if specified
+        assert len(grouped_batched_positions) == len(grouped_batched_patches)
 
-        batched_images = self.group_images_by_max_seq_len(batched_images)
-
-        # process images into variable lengthed sequences with attention mask
+        # process patches into variable lengthed sequences with attention mask
 
         num_images = []
         batched_sequences = []
         batched_positions = []
         batched_image_ids = []
 
-        for images in batched_images:
-            num_images.append(len(images))
+        for grouped_patches, grouped_positions in zip(grouped_batched_patches, grouped_batched_positions):
+            assert len(grouped_patches) == len(grouped_positions)
+            num_images.append(len(grouped_patches))
 
-            sequences = []
-            positions = []
             image_ids = torch.empty((0,), device=device, dtype=torch.long)
-            image_dimensions = []
 
-            for image_id, image in enumerate(images):
-                assert image.ndim == 3 and image.shape[0] == c
-                image_dims = image.shape[-2:]
-                assert all(
-                    [divisible_by(dim, p) for dim in image_dims]
-                ), f"height and width {image_dims} of images must be divisible by patch size {p}"
+            for image_id, (patches, positions) in enumerate(zip(grouped_patches, grouped_positions)):
+                k, z = patches.shape
 
-                ph, pw = map(lambda dim: dim // p, image_dims)
+                assert z == self.channels * self.patch_size ** 2, f"{z} != {self.channels * self.patch_size ** 2}"
 
-                pos = torch.stack(
-                    torch.meshgrid((arange(ph), arange(pw)), indexing="ij"), dim=-1
-                )
+                assert positions.shape[0] == k
 
-                pos = rearrange(pos, "h w c -> (h w) c")
-                seq = rearrange(image, "c (h p1) (w p2) -> (h w) (c p1 p2)", p1=p, p2=p)
-
-                seq_len = seq.shape[-2]
-
-                if has_token_dropout:
-                    token_dropout = self.calc_token_dropout(*image_dims)
-                    num_keep = max(1, int(seq_len * (1 - token_dropout)))
-                    keep_indices = (
-                        torch.randn((seq_len,), device=device)
-                        .topk(num_keep, dim=-1)
-                        .indices
-                    )
-
-                    seq = seq[keep_indices]
-                    pos = pos[keep_indices]
-
-                image_ids = F.pad(image_ids, (0, seq.shape[-2]), value=image_id)
-                sequences.append(seq)
-                positions.append(pos)
-                image_dimensions.append(torch.Tensor(image_dims))
+                image_ids = F.pad(image_ids, (0, k), value=image_id)
 
             batched_image_ids.append(image_ids)
-            batched_sequences.append(torch.cat(sequences, dim=0))
-            batched_positions.append(torch.cat(positions, dim=0))
+            batched_sequences.append(torch.cat(grouped_patches, dim=0))
+            batched_positions.append(torch.cat(grouped_positions, dim=0))
 
         # derive key padding mask
 
@@ -322,8 +419,6 @@ class DCTProcessor:
 
         num_images = torch.tensor(num_images, device=device, dtype=torch.long)
 
-        # factorized 2d absolute positional embedding
-
         h_indices, w_indices = patch_positions.unbind(dim=-1)
 
         return DCTPatches(
@@ -334,9 +429,9 @@ class DCTProcessor:
             attn_mask=attn_mask,
             batched_image_ids=batched_image_ids,
             patch_positions=patch_positions,
-            has_token_dropout=has_token_dropout,
-            original_sizes=original_sizes,
+            **dct_patch_kwargs,
         )
+
 
     def revert_patching(self, output: DCTPatches) -> List[torch.Tensor]:
         """
@@ -346,30 +441,34 @@ class DCTProcessor:
         or the vector from y corresponding to that image and that spacial position.
         """
         x = output.patches
-
-        # doesnt work with token dropout
-        # because then h,w might be incorrect
-        assert not output.has_token_dropout
+        z = x.shape[-1]
 
         images = []
 
         for batch_i, (image_ids, mask, positions) in enumerate(
-            zip(output.batched_image_ids, output.key_pad_mask, output.patch_positions)
+            zip(output.batched_image_ids, output.key_pad_mask, output.patch_positions,)
         ):
             # take the tokens that have actual images associated with them
             for image_id in image_ids.unique():
                 image_mask = (image_ids == image_id) & ~mask
                 image_tokens = x[batch_i, image_mask, :]
                 image_positions = positions[image_mask]
-                h, w = image_positions.max(dim=0).values + 1
-                image = rearrange(
-                    image_tokens,
-                    "(h w) (c p1 p2) -> c (h p1) (w p2)",
-                    p1=self.patch_size,
-                    p2=self.patch_size,
-                    w=w,
-                    h=h,
-                )
+                h, w = output.original_sizes[len(images)]
+
+                image = torch.zeros(h, w, z, dtype=x.dtype, device=x.device)
+
+                for token, pos in zip(image_tokens, image_positions):
+                    pos_h,pos_w = pos.unbind(-1)
+                    image[pos_h, pos_w, :] = token 
+
+                #image = rearrange(
+                #    image_tokens,
+                #    "(h w) (c p1 p2) -> c (h p1) (w p2)",
+                #    p1=self.patch_size,
+                #    p2=self.patch_size,
+                #    w=w,
+                #    h=h,
+                #)
                 images.append(image)
 
         return images
