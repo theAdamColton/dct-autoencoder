@@ -35,18 +35,6 @@ class DCTAutoencoder(nn.Module):
         self.feature_channels = feature_channels
         self.max_n_patches = max_n_patches
 
-        self.vq_norm_out = nn.Sequential(
-            nn.LayerNorm(feature_channels),
-            nn.GELU(),
-        )
-
-        self.proj_out = nn.Sequential(
-            FeedForward(feature_channels, mlp_dim),
-            nn.LayerNorm(feature_channels),
-            nn.GELU(),
-            nn.Linear(feature_channels, image_channels * patch_size**2),
-        )
-
 #        self.encoder = NaViT(
 #            image_size=max_n_patches * patch_size,
 #            patch_size=patch_size,
@@ -61,16 +49,17 @@ class DCTAutoencoder(nn.Module):
 
         patch_dim = image_channels * (patch_size**2)
 
-        self.to_patch_embedding = nn.Sequential(
-            nn.Linear(patch_dim, feature_channels),
-            nn.LayerNorm(feature_channels),
-            nn.GELU(),
-        )
-
         pos_dim = patch_dim if pos_embed_before_proj else feature_channels
         self.pos_embed_before_proj = pos_embed_before_proj
         self.pos_embed_height = nn.Parameter(torch.zeros(max_n_patches, pos_dim))
         self.pos_embed_width = nn.Parameter(torch.zeros(max_n_patches, pos_dim))
+
+
+        self.to_patch_embedding = nn.Sequential(
+            #nn.LayerNorm(patch_dim),
+            nn.Linear(patch_dim, feature_channels),
+            nn.LayerNorm(feature_channels),
+        )
 
         self.encoder = Encoder(
                 dim=feature_channels,
@@ -83,9 +72,15 @@ class DCTAutoencoder(nn.Module):
                 #attn_one_kv_head = True,
                 sandwich_norm = True,
             )
-        
 
         self.vq_model = vq_model
+
+        self.proj_out = nn.Sequential(
+            nn.LayerNorm(feature_channels),
+            nn.Linear(feature_channels, image_channels * patch_size**2),
+        )
+        
+
 
         self.codebook_size = codebook_size
 
@@ -98,15 +93,11 @@ class DCTAutoencoder(nn.Module):
         self,
         # normalized dct patches
         dct_patches: DCTPatches = None,
-        pixel_values: List[torch.Tensor] = None,
         decode: bool = False,
     ):
-        if pixel_values is not None:
-            dct_patches = self.dct_processor.preprocess(pixel_values)
-
         dct_normalized_patches = dct_patches.patches.clone()
 
-        assert not dct_patches.patches.isnan().any().item()
+        #assert not dct_patches.patches.isnan().any().item()
 
         # possibly adds pos embedding info before projecting in
         if self.pos_embed_before_proj:
@@ -128,7 +119,7 @@ class DCTAutoencoder(nn.Module):
         # X-Transformers uses ~attn_mask
         dct_patches.patches = self.encoder(dct_patches.patches, attn_mask=~dct_patches.attn_mask)
 
-        assert not dct_patches.patches.isnan().any().item()
+        #assert not dct_patches.patches.isnan().any().item()
 
         mask = ~dct_patches.key_pad_mask
 
@@ -138,8 +129,6 @@ class DCTAutoencoder(nn.Module):
         dct_patches.patches = dct_patches.patches.to(torch.float32)
         dct_patches.patches, codes, commit_loss = self.vq_model(dct_patches.patches)#, mask=mask)
         dct_patches.patches = dct_patches.patches.to(dct_normalized_patches.dtype)
-
-        dct_patches.patches = self.vq_norm_out(dct_patches.patches)
 
         with torch.no_grad():
             perplexity = calculate_perplexity(codes[mask], self.codebook_size)
@@ -156,9 +145,16 @@ class DCTAutoencoder(nn.Module):
                 rec_loss=rec_loss,
                 codes=codes,
             )
+    
+
+        # TODO test if denormalizing normalizing AFTER doing the postprocessing padding gets better results
+        # un normalizes patches
+        dct_patches.patches = self.dct_processor.patch_norm.inverse_norm(dct_patches.patches, dct_patches.h_indices, dct_patches.w_indices, )
 
         images_hat = self.dct_processor.postprocess(dct_patches)
 
+        # un normalizes patches
+        dct_normalized_patches = self.dct_processor.patch_norm.inverse_norm(dct_normalized_patches, dct_patches.h_indices, dct_patches.w_indices, )
         dct_patches.patches = dct_normalized_patches
         images = self.dct_processor.postprocess(dct_patches)
 

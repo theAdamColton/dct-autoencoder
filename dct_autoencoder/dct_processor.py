@@ -151,11 +151,14 @@ class DCTProcessor:
 
     @torch.no_grad()
     def _transform_image_in(self, x):
-        return dct2(x, 'ortho')
+        og_dtype = x.dtype
+        return dct2(x.to(torch.float32), 'ortho').to(og_dtype)
 
     @torch.no_grad()
     def _transform_image_out(self, x):
-        return idct2(x, 'ortho')
+        og_dtype = x.dtype
+        return idct2(x.to(torch.float32), 'ortho').to(og_dtype)
+            
 
     @torch.no_grad()
     def preprocess(self, x: List[torch.Tensor]):
@@ -172,7 +175,6 @@ class DCTProcessor:
 
             cropped_im = self._crop_image(im)
             c,ch,cw = cropped_im.shape
-
 
             ph, pw = ch // self.patch_size, cw//self.patch_size
             patch_sizes.append((ph, pw))
@@ -287,13 +289,13 @@ class DCTProcessor:
 
         ph, pw = h//self.patch_size, w//self.patch_size
 
-        h_indices, w_indices = torch.meshgrid(torch.arange(ph), torch.arange(pw))
+        h_indices, w_indices = torch.meshgrid(torch.arange(ph), torch.arange(pw), indexing='ij')
 
         # distances from upper left corner
         tri_distances = (h_indices + w_indices) * 1.0
 
         # takes the top p closest distances
-        p = self.dct_compression_factor
+        p = 1-self.dct_compression_factor
         _, indices_flat = tri_distances.view(-1).sort()
         k = round(len(indices_flat) * p)
         k = max(1, k)
@@ -376,11 +378,7 @@ class DCTProcessor:
         """
         returns a batch of DCTPatches
         """
-        p, c, device = (
-            self.patch_size,
-            self.channels,
-            torch.device("cpu"),
-        )
+        device = torch.device("cpu")
 
         arange = partial(torch.arange, device=device)
         pad_sequence = partial(orig_pad_sequence, batch_first=True)

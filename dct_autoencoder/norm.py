@@ -38,7 +38,7 @@ class PatchNorm(nn.Module):
         patch_height_dim: int,
         patch_width_dim: int,
         patch_dim: int,
-        eps: float = 1e-3,
+        eps: float = 1e-4,
     ):
         super().__init__()
         self.eps = eps

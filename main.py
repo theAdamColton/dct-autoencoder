@@ -21,14 +21,18 @@ OUTDIR = f"out/{time.ctime()}/"
 os.makedirs(OUTDIR, exist_ok=True)
 
 
-def get_collate_fn(processor: DCTProcessor, device):
+def get_collate_fn(processor: DCTProcessor):
     def collate(x: List[dict]):
-        dct_features = []
+        patches = []
+        positions = []
         original_sizes = []
+        patch_sizes = []
         for d in x:
-            dct_features.append(d["dct_features"])
+            patches.append(d["patches"])
+            positions.append(d["positions"])
             original_sizes.append(d["original_sizes"])
-        return processor.patch_images(dct_features, original_sizes)
+            patch_sizes.append(d["patch_sizes"])
+        return processor.batch(patches, positions, original_sizes, patch_sizes)
 
     return collate
 
@@ -65,7 +69,7 @@ def train(
     autoencoder: DCTAutoencoder,
     train_ds,
     batch_size: int = 32,
-    learning_rate=1e-3,
+    learning_rate=3e-3,
     epochs: int = 1,
     device="cuda",
     dtype=torch.bfloat16,
@@ -80,14 +84,14 @@ def train(
 
     n_steps = 0
 
-    collate_fn = get_collate_fn(autoencoder.dct_processor, device)
+    collate_fn = get_collate_fn(autoencoder.dct_processor, )
 
     # trains norm layer
     train_ds = train_ds.shuffle(1000)
 
     def get_dataloader():
         return DataLoader(
-            train_ds, batch_size=batch_size, num_workers=0, collate_fn=collate_fn
+            train_ds, batch_size=batch_size, num_workers=2, collate_fn=collate_fn
         )
 
     dataloader = get_dataloader()
@@ -121,6 +125,10 @@ def train(
 
             batch = batch.to(device)
             batch.patches = batch.patches.to(dtype)
+
+            seq_len = batch.patches.shape[1]
+            batch_len = batch.patches.shape[0]
+
             # normalizes 
             with torch.no_grad():
                 batch.patches = autoencoder.dct_processor.patch_norm.forward(batch.patches, batch.h_indices, batch.w_indices, batch.key_pad_mask)
@@ -136,7 +144,7 @@ def train(
                         batch.attn_mask[:n_log],
                         batch.batched_image_ids[:n_log],
                         batch.patch_positions[:n_log],
-                        batch.has_token_dropout,
+                        batch.patch_sizes,
                         batch.original_sizes,
                 )
                 with torch.no_grad():
@@ -192,6 +200,8 @@ def train(
                             rec_loss=out["rec_loss"].item(),
                             commit_loss=commit_loss.item(),
                             perplexity=out["perplexity"].item(),
+                            batch_len=batch_len,
+                            seq_len=seq_len,
                         )
                     }
                 )
@@ -217,9 +227,8 @@ def load_and_transform_dataset(
         return False if h < min_res or w < min_res else True
 
     def preproc(x):
-        x["dct_features"], x["original_sizes"] = dct_processor.image_to_dct(
-            x["pixel_values"]
-        )
+        patches, positions, original_sizes, patch_sizes = dct_processor.preprocess([x["pixel_values"]])
+        x["patches"], x["positions"], x["original_sizes"], x["patch_sizes"]  = patches[0], positions[0], original_sizes[0], patch_sizes[0]
         return x
 
     ds = (
@@ -229,7 +238,7 @@ def load_and_transform_dataset(
         .decode("torchrgb", partial=True, handler=wds.handlers.warn_and_continue)
         .rename(pixel_values="jpg")
         .map(preproc)
-        .rename_keys(original_sizes="original_sizes", dct_features="dct_features")
+        .rename_keys(patches="patches", positions="positions", original_sizes="original_sizes", patch_sizes="patch_sizes")
     )  # drops old columns
 
     return ds
@@ -245,27 +254,49 @@ def main(
 ):
     feature_channels: int = 768
     image_channels: int = 3
-    dct_compression_factor = 0.45
-    max_n_patches = 128
-    max_seq_len = 180
+    dct_compression_factor = 0.25
+    max_n_patches = 256
+    max_seq_len = 384
     max_batch_size = batch_size
     depth = 4
+    warmup_steps = 50
+
+    codebook_dim=32
+    sample_codebook_temp =1.0
+    commitment_weight=5e-2
+    threshold_ema_dead_code=5
 
     def get_model(codebook_size, heads, patch_size):
         vq_model = vector_quantize_pytorch.VectorQuantize(
             feature_channels,
             codebook_size=codebook_size,
-            codebook_dim=16,
-            threshold_ema_dead_code=10,
+            codebook_dim=codebook_dim,
+            threshold_ema_dead_code=threshold_ema_dead_code,
             heads=heads,
             channel_last=True,
             accept_image_fmap=False,
+            use_cosine_sim=False,
             kmeans_init=True,
+            kmeans_iters=20,
             separate_codebook_per_head=False,
-            sample_codebook_temp=0.8,
-            decay=0.89,
-            commitment_weight=1e-5,
+
+            learnable_codebook=True,
+            ema_update=False,
+            affine_param=True,
+            straight_through=False,
+            affine_param_batch_decay = 0.99,
+            affine_param_codebook_decay = 0.9,
+            #sync_update_v=0.01,
+
+            sample_codebook_temp=sample_codebook_temp,
+            commitment_weight=commitment_weight,
         ).to(torch.float32).to(device)
+
+#        vq_model = vector_quantize_pytorch.LFQ(
+#                dim=feature_channels,
+#                codebook_size=codebook_size,
+#                num_codebooks=heads,
+#            )
 
         proc = DCTProcessor(
             channels=image_channels,
@@ -299,9 +330,9 @@ def main(
 
     #    for codebook_size in codebook_sizes:
     #        for heads in head_numbers:
-    for learning_rate in [5e-4]:
-        for patch_size in [8]:
-            heads = patch_size * 2
+    for learning_rate in [1e-4]:
+        for patch_size in [12]:
+            heads = 16
             autoencoder, processor = get_model(codebook_size, heads, patch_size)
 
             ds_train = load_and_transform_dataset(
@@ -320,6 +351,11 @@ def main(
                 feature_dim=feature_channels,
                 patch_size=patch_size,
                 learning_rate=learning_rate,
+                codebook_dim=codebook_dim,
+                sample_codebook_temp =sample_codebook_temp,
+                commitment_weight=commitment_weight,
+                threshold_ema_dead_code=threshold_ema_dead_code,
+                warmup_steps=warmup_steps,
             )
 
             print("starting run: ", run_d)
@@ -335,6 +371,7 @@ def main(
                 batch_size=batch_size,
                 use_wandb=use_wandb,
                 train_norm_iters=train_norm_iters,
+                warmup_steps=warmup_steps,
             )
 
             autoencoder = None
