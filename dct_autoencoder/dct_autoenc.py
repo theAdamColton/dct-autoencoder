@@ -75,15 +75,13 @@ class DCTAutoencoder(nn.Module):
         self.encoder = Encoder(
                 dim=feature_channels,
                 depth=depth,
-                heads=32,
+                heads=16,
                 attn_flash = True,
-                use_rmsnorm = True,
+                #use_rmsnorm = True,
                 ff_glu = True,
                 ff_no_bias = True,
-                attn_one_kv_head = True,
+                #attn_one_kv_head = True,
                 sandwich_norm = True,
-                attn_qk_norm = True,
-                attn_qk_norm_dim_scale = True,
             )
         
 
@@ -112,15 +110,15 @@ class DCTAutoencoder(nn.Module):
 
         # possibly adds pos embedding info before projecting in
         if self.pos_embed_before_proj:
-            h_pos = self.pos_embed_height[dct_patches.h_indices].norm(dim=-1, keepdim=True)
-            w_pos = self.pos_embed_width[dct_patches.w_indices].norm(dim=-1, keepdim=True)
+            h_pos = self.pos_embed_height[dct_patches.h_indices]
+            w_pos = self.pos_embed_width[dct_patches.w_indices]
 
             dct_patches.patches = dct_patches.patches + h_pos + w_pos
             dct_patches.patches = self.to_patch_embedding(dct_patches.patches)
         else:
             dct_patches.patches = self.to_patch_embedding(dct_patches.patches)
-            h_pos = self.pos_embed_height[dct_patches.h_indices].norm(dim=-1, keepdim=True)
-            w_pos = self.pos_embed_width[dct_patches.w_indices].norm(dim=-1, keepdim=True)
+            h_pos = self.pos_embed_height[dct_patches.h_indices]
+            w_pos = self.pos_embed_width[dct_patches.w_indices]
 
             dct_patches.patches = dct_patches.patches + h_pos + w_pos
 
