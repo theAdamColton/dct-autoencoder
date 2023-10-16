@@ -190,7 +190,7 @@ class DCTProcessor:
         return patched_ims, positions, original_sizes, patch_sizes
 
     @torch.no_grad()
-    def batch(self, patches: List[torch.Tensor], positions: List[torch.Tensor], original_sizes: List[Tuple[int,int]], patch_sizes: List[Tuple[int, int]]) -> DCTPatches:
+    def batch(self, patches: List[torch.Tensor], positions: List[torch.Tensor], original_sizes: List[Tuple[int,int]], patch_sizes: List[Tuple[int, int]], device='cpu') -> DCTPatches:
         """
         batch the result of preprocess
         """
@@ -373,13 +373,12 @@ class DCTProcessor:
     def _batch_groups(self,
                grouped_batched_patches: List[List[Tensor]],
                grouped_batched_positions: List[List[Tensor]],
+               device=torch.device('cpu'),
                **dct_patch_kwargs,
                       ) -> DCTPatches:
         """
         returns a batch of DCTPatches
         """
-        device = torch.device("cpu")
-
         arange = partial(torch.arange, device=device)
         pad_sequence = partial(orig_pad_sequence, batch_first=True)
 
@@ -433,9 +432,9 @@ class DCTProcessor:
 
         # combine patched images as well as the patched width / height positions for 2d positional embedding
 
-        patches = pad_sequence(batched_sequences)
+        patches = pad_sequence(batched_sequences).to(device)
 
-        patch_positions = pad_sequence(batched_positions)
+        patch_positions = pad_sequence(batched_positions).to(device)
 
         # need to know how many images for final attention pooling
 

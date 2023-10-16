@@ -28,7 +28,7 @@ def get_decay_fn(start_val:float, end_value:float, n:int):
         return ((n-i) / n) * start_val + (i/n) * end_value
     return fn
 
-def get_collate_fn(processor: DCTProcessor):
+def get_collate_fn(processor: DCTProcessor,):
     def collate(x: List[dict]):
         patches = []
         positions = []
@@ -39,7 +39,7 @@ def get_collate_fn(processor: DCTProcessor):
             positions.append(d["positions"])
             original_sizes.append(d["original_sizes"])
             patch_sizes.append(d["patch_sizes"])
-        return processor.batch(patches, positions, original_sizes, patch_sizes)
+        return processor.batch(patches, positions, original_sizes, patch_sizes, )
 
     return collate
 
@@ -265,19 +265,20 @@ def main(
     use_wandb: bool = False,
     train_norm_iters: int = 10,
 ):
-    max_iters = 200
+    max_iters = 500
 
 
     feature_channels: int = 1024
     image_channels: int = 3
-    dct_compression_factor = 0.40
+    dct_compression_factor = 0.3
     max_n_patches = 256
     max_seq_len = 384
     max_batch_size = batch_size
-    depth = 3
+    depth = 4
     warmup_steps = 50
 
     codebook_dim=32
+    codebook_size = 1024
     threshold_ema_dead_code=5
     straight_through=True
     sync_update_v=0.01
@@ -285,10 +286,11 @@ def main(
 
     use_cosine_sim=False
 
-    commitment_loss_weight_start = 5e-3
+    commitment_loss_weight_start = 1e-3
     commitment_loss_weight_end = 5e-5
     commitment_loss_weight_n = max_iters
     commitment_loss_weight_fn = get_decay_fn(commitment_loss_weight_start, commitment_loss_weight_end, commitment_loss_weight_n)
+
 
     lfq_entropy_loss_start = 5e-0
     lfq_entropy_loss_n = max_iters
@@ -332,7 +334,7 @@ def main(
 
                 sample_codebook_temp=sample_codebook_temp,
                 commitment_weight=commitment_loss_weight_start,
-            ).to(torch.float32).to(device)
+            )
             vq_callables = [lambda i: {"entropy_loss_weight":lfq_decay_fn(i),"commitment_weight":commitment_loss_weight_fn(i)} ]
 
 
@@ -360,82 +362,76 @@ def main(
             .to(device)
         )
 
-        model.vq_model = model.vq_model.to(torch.float32)
-
         return model, proc, vq_callables
-
-    codebook_size = 512
 
     #    for codebook_size in codebook_sizes:
     #        for heads in head_numbers:
-    for learning_rate in [5e-5, 1e-4, 5e-4]:
-        for patch_size in [8, 16]:
-            for vq_type in ["lfq",]:
-                for heads in [16]:
-                    autoencoder, processor, vq_callables = get_model(codebook_size, heads, patch_size, vq_type, )
+    for vq_type in ["lfq",]:
+        for patch_size in [4, 8, 16]:
+            heads = patch_size * 2
 
-                    ds_train = load_and_transform_dataset(
-                        image_dataset_path_or_url,
-                        processor,
-                    )
+            for learning_rate in [1e-4, 5e-5, 1e-5]:
+                autoencoder, processor, vq_callables = get_model(codebook_size, heads, patch_size, vq_type, )
 
-                    bits = heads * math.log2(codebook_size) * max_seq_len
+                ds_train = load_and_transform_dataset(
+                    image_dataset_path_or_url,
+                    processor,
+                )
 
-                    run_d = dict(
-                        codebook_size=codebook_size,
-                        heads=heads,
-                        image_channels=image_channels,
-                        dct_compression_factor=dct_compression_factor,
-                        max_n_patches=max_n_patches,
-                        depth=depth,
-                        bits= bits,
-                        use_cosine_sim=use_cosine_sim,
-                        compression_over_patches=max_seq_len * image_channels * patch_size * patch_size / bits,
-                        compression_over_image=256 ** 2 * image_channels/bits,
-                        feature_dim=feature_channels,
-                        patch_size=patch_size,
-                        learning_rate=learning_rate,
-                        codebook_dim=codebook_dim,
-                        sample_codebook_temp =sample_codebook_temp,
-                        commitment_loss_weight_start=commitment_loss_weight_start,
-                        commitment_loss_weight_end=commitment_loss_weight_end,
-                        commitment_loss_weight_n=commitment_loss_weight_n,
-                        threshold_ema_dead_code=threshold_ema_dead_code,
-                        warmup_steps=warmup_steps,
-                        straight_through=straight_through,
-                        sync_update_v=sync_update_v,
-                        learnable_codebook=learnable_codebook,
-                        vq_type=vq_type,
-                        lfq_entropy_loss_start=lfq_entropy_loss_start,
-                        lfq_entropy_loss_end=lfq_entropy_loss_end,
-                        lfq_entropy_loss_n=lfq_entropy_loss_n,
-                    )
+                bits = heads * math.log2(codebook_size) * max_seq_len
 
-                    print("starting run: ", run_d)
+                run_d = dict(
+                    codebook_size=codebook_size,
+                    heads=heads,
+                    image_channels=image_channels,
+                    dct_compression_factor=dct_compression_factor,
+                    max_n_patches=max_n_patches,
+                    depth=depth,
+                    bits= bits,
+                    use_cosine_sim=use_cosine_sim,
+                    compression_over_patches=max_seq_len * image_channels * patch_size * patch_size / bits,
+                    compression_over_image=512 ** 2 * image_channels/bits,
+                    feature_dim=feature_channels,
+                    patch_size=patch_size,
+                    learning_rate=learning_rate,
+                    codebook_dim=codebook_dim,
+                    sample_codebook_temp =sample_codebook_temp,
+                    commitment_loss_weight_start=commitment_loss_weight_start,
+                    commitment_loss_weight_end=commitment_loss_weight_end,
+                    commitment_loss_weight_n=commitment_loss_weight_n,
+                    threshold_ema_dead_code=threshold_ema_dead_code,
+                    warmup_steps=warmup_steps,
+                    straight_through=straight_through,
+                    sync_update_v=sync_update_v,
+                    learnable_codebook=learnable_codebook,
+                    vq_type=vq_type,
+                    lfq_entropy_loss_start=lfq_entropy_loss_start,
+                    lfq_entropy_loss_end=lfq_entropy_loss_end,
+                    lfq_entropy_loss_n=lfq_entropy_loss_n,
+                )
 
-                    if use_wandb:
-                        wandb.init(project="vq-experiments", config=run_d)
+                print("starting run: ", run_d)
 
-                    try:
-                        autoencoder = train(
-                            autoencoder,
-                            ds_train,
-                            device=device,
-                            dtype=dtype,
-                            batch_size=batch_size,
-                            use_wandb=use_wandb,
-                            train_norm_iters=train_norm_iters,
-                            warmup_steps=warmup_steps,
-                            max_steps=max_iters,
-                            vq_callables=vq_callables,
-                        )
-                    except Exception as e:
-                        print("training run crashed", e)
+                if use_wandb:
+                    wandb.init(project="vq-experiments", config=run_d)
 
-                    autoencoder = None
+                autoencoder = train(
+                    autoencoder,
+                    ds_train,
+                    device=device,
+                    dtype=dtype,
+                    batch_size=batch_size,
+                    use_wandb=use_wandb,
+                    train_norm_iters=train_norm_iters,
+                    warmup_steps=warmup_steps,
+                    max_steps=max_iters,
+                    vq_callables=vq_callables,
+                )
 
-                    if use_wandb:
-                        wandb.finish()
+                autoencoder = None
+
+                if use_wandb:
+                    wandb.finish()
 
 
 if __name__ == "__main__":

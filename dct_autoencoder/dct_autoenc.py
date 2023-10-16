@@ -119,9 +119,9 @@ class DCTAutoencoder(nn.Module):
         # TODO figure out how to make the mask work
         # with the vq model, because it effects the codebook
         # update
-        dct_patches.patches = dct_patches.patches.to(torch.float32)
+        #dct_patches.patches = dct_patches.patches.to(torch.float32)
         dct_patches.patches, codes, commit_loss = self.vq_model(dct_patches.patches)#, mask=mask)
-        dct_patches.patches = dct_patches.patches.to(dct_normalized_patches.dtype)
+        #dct_patches.patches = dct_patches.patches.to(dct_normalized_patches.dtype)
 
         with torch.no_grad():
             perplexity = calculate_perplexity(codes[mask], self.codebook_size)
