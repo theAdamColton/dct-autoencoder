@@ -277,13 +277,16 @@ class DCTProcessor:
         # distances from upper left corner
         tri_distances = (h_indices + w_indices) * 1.0
 
-        # takes the top p closest distances
-        p = min(max(self.sample_patches(), 0.01), 1.0)
         _, indices_flat = tri_distances.view(-1).sort()
-        k = round(len(indices_flat) * p)
-        k = max(1, k)
-        k = min(len(indices_flat), k)
+
+        k = len(indices_flat)
         k = min(k, self.max_n_patches)
+        # takes the top p closest distances (that are under self.max_n_patches)
+        p = self.sample_patches()
+        k = round(k * p)
+        k = max(1, k)
+        k = min(self.max_n_patches, k)
+
         indices_flat = indices_flat[:k]
 
         # patches x into a list of patches

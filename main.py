@@ -1,6 +1,7 @@
-from typing import Callable, List
+from typing import Callable, List, Optional
 from tqdm import tqdm
 import torch
+from torch import nn
 import vector_quantize_pytorch
 import webdataset as wds
 from torch.utils.data import DataLoader
@@ -22,6 +23,12 @@ OUTDIR = f"out/{time.ctime()}/"
 
 os.makedirs(OUTDIR, exist_ok=True)
 
+
+class DummyVQ(nn.Module):
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+    def forward(self, x, **kwargs):
+        return x, torch.zeros_like(x, dtype=torch.long), torch.zeros(1, device=x.device, dtype=x.dtype) 
 
 def get_decay_fn(start_val:float, end_value:float, n:int):
     def fn(i: int):
@@ -223,9 +230,10 @@ def train(
                 )
 
             if n_steps > max_steps:
-                return autoencoder
+                break
 
             n_steps += 1
+
 
     return autoencoder
 
@@ -267,20 +275,22 @@ def main(
     device="cuda",
     dtype=torch.bfloat16,
     batch_size: int = 32,
+    max_batch_size:Optional[int] = None,
     num_workers:int=0,
     use_wandb: bool = False,
     train_norm_iters: int = 10,
 ):
-    max_iters = 500
+    max_iters = 5000
 
 
     image_channels: int = 3
-    max_batch_size = batch_size
-    depth = 3
+    if max_batch_size is None:
+        max_batch_size = batch_size
+    depth = 2
     warmup_steps = 50
 
     codebook_dim=32
-    codebook_size = 1024
+    codebook_size = 2048
     threshold_ema_dead_code=5
     straight_through=True
     sync_update_v=0.01
@@ -288,15 +298,15 @@ def main(
 
     use_cosine_sim=False
 
-    commitment_loss_weight_start = 1e-3
-    commitment_loss_weight_end = 5e-5
+    commitment_loss_weight_start = 5e-4
+    commitment_loss_weight_end = 1e-8
     commitment_loss_weight_n = max_iters
     commitment_loss_weight_fn = get_decay_fn(commitment_loss_weight_start, commitment_loss_weight_end, commitment_loss_weight_n)
 
 
-    lfq_entropy_loss_start = 5e-0
+    lfq_entropy_loss_start = 1e1
     lfq_entropy_loss_n = max_iters
-    lfq_entropy_loss_end = 1e-4
+    lfq_entropy_loss_end = 1e-1
     lfq_decay_fn = get_decay_fn(lfq_entropy_loss_start, lfq_entropy_loss_end, lfq_entropy_loss_n)
 
     sample_codebook_temp= 1.0
@@ -338,12 +348,15 @@ def main(
                 commitment_weight=commitment_loss_weight_start,
             )
             vq_callables = [lambda i: {"entropy_loss_weight":lfq_decay_fn(i),"commitment_weight":commitment_loss_weight_fn(i)} ]
+        elif vq_type == "dummy":
+            vq_model = DummyVQ()
+            vq_callables = []
 
 
         proc = DCTProcessor(
             channels=image_channels,
             patch_size=patch_size,
-            sample_patches=lambda : uniform(0.1, 1.0),
+            sample_patches=lambda : uniform(0.05, 1.0),
             max_n_patches=max_n_patches,
             max_seq_len=max_seq_len,
             max_batch_size=max_batch_size,
@@ -371,14 +384,15 @@ def main(
     #    for codebook_size in codebook_sizes:
     #        for heads in head_numbers:
     for vq_type in ["lfq",]:
-        for patch_size in [4, 8, 16, 32]:
+        for patch_size in [6,]:# 8, 16, ]:
             heads = patch_size
             max_n_patches = max_total_codes // heads
-            max_seq_len = max_n_patches * 2
+            max_seq_len = power_of_two(max_n_patches)
             _input_features = image_channels * patch_size ** 2
-            feature_channels: int = max(256, power_of_two(_input_features))
+            feature_channels: int = max(64, power_of_two(_input_features))
+            feature_channels = min(feature_channels, 2048)
 
-            for learning_rate in [3e-4,]:
+            for learning_rate in [4e-5,]:
                 autoencoder, processor, vq_callables = get_model(codebook_size, heads, patch_size, vq_type, )
 
                 ds_train = load_and_transform_dataset(
