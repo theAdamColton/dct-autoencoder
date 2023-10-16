@@ -1,4 +1,4 @@
-from typing import List
+from typing import Callable, List
 from tqdm import tqdm
 import torch
 import vector_quantize_pytorch
@@ -20,6 +20,13 @@ OUTDIR = f"out/{time.ctime()}/"
 
 os.makedirs(OUTDIR, exist_ok=True)
 
+
+def get_decay_fn(start_val:float, end_value:float, n:int):
+    def fn(i: int):
+        if i > n:
+            return end_value
+        return ((n-i) / n) * start_val + (i/n) * end_value
+    return fn
 
 def get_collate_fn(processor: DCTProcessor):
     def collate(x: List[dict]):
@@ -73,12 +80,13 @@ def train(
     epochs: int = 1,
     device="cuda",
     dtype=torch.bfloat16,
-    log_every=10,
+    log_every=20,
     n_log: int = 10,
     max_steps=1e20,
     warmup_steps=20,
     train_norm_iters: int = 15,  # number of iterations to train the norm layer
     use_wandb: bool = False,
+    vq_callables: List[Callable[[int], dict]] = [],
 ):
     optimizer = torch.optim.Adam(autoencoder.parameters(), lr=1e-9)
 
@@ -91,7 +99,7 @@ def train(
 
     def get_dataloader():
         return DataLoader(
-            train_ds, batch_size=batch_size, num_workers=2, collate_fn=collate_fn
+            train_ds, batch_size=batch_size, num_workers=4, collate_fn=collate_fn
         )
 
     dataloader = get_dataloader()
@@ -178,7 +186,7 @@ def train(
                 decode=False,
             )
 
-            commit_loss = out["commit_loss"]
+            commit_loss = out["commit_loss"].mean()
 
             loss = out["rec_loss"] + commit_loss
 
@@ -186,14 +194,7 @@ def train(
             torch.nn.utils.clip_grad_norm_(autoencoder.parameters(), 5.0)
             optimizer.step()
 
-            print(
-                f"epoch: {epoch} loss: {loss.item():.3f} rec_loss: {out['rec_loss'].item():.2f} commit_loss: {commit_loss.item():.2f} perplexity: {out['perplexity'].item():.2f}"
-            )
-
-            if use_wandb:
-                wandb.log(
-                    {
-                        "train": dict(
+            log_dict = dict(
                             epoch=epoch,
                             step=i,
                             loss=loss.item(),
@@ -202,7 +203,19 @@ def train(
                             perplexity=out["perplexity"].item(),
                             batch_len=batch_len,
                             seq_len=seq_len,
-                        )
+            )
+
+            for fn in vq_callables:
+                d = fn(i)
+                for k,v in d.items():
+                    autoencoder.vq_model.__dict__[k] = v
+                    log_dict[k] = v
+
+            print(log_dict)
+            if use_wandb:
+                wandb.log(
+                    {
+                        "train": log_dict
                     }
                 )
 
@@ -252,51 +265,76 @@ def main(
     use_wandb: bool = False,
     train_norm_iters: int = 10,
 ):
-    feature_channels: int = 768
+    max_iters = 200
+
+
+    feature_channels: int = 1024
     image_channels: int = 3
-    dct_compression_factor = 0.25
+    dct_compression_factor = 0.40
     max_n_patches = 256
     max_seq_len = 384
     max_batch_size = batch_size
-    depth = 4
+    depth = 3
     warmup_steps = 50
 
     codebook_dim=32
-    sample_codebook_temp =1.0
-    commitment_weight=5e-2
     threshold_ema_dead_code=5
+    straight_through=True
+    sync_update_v=0.01
+    learnable_codebook=True
 
-    def get_model(codebook_size, heads, patch_size):
-        vq_model = vector_quantize_pytorch.VectorQuantize(
-            feature_channels,
-            codebook_size=codebook_size,
-            codebook_dim=codebook_dim,
-            threshold_ema_dead_code=threshold_ema_dead_code,
-            heads=heads,
-            channel_last=True,
-            accept_image_fmap=False,
-            use_cosine_sim=False,
-            kmeans_init=True,
-            kmeans_iters=20,
-            separate_codebook_per_head=False,
+    use_cosine_sim=False
 
-            learnable_codebook=True,
-            ema_update=False,
-            affine_param=True,
-            straight_through=False,
-            affine_param_batch_decay = 0.99,
-            affine_param_codebook_decay = 0.9,
-            #sync_update_v=0.01,
+    commitment_loss_weight_start = 5e-3
+    commitment_loss_weight_end = 5e-5
+    commitment_loss_weight_n = max_iters
+    commitment_loss_weight_fn = get_decay_fn(commitment_loss_weight_start, commitment_loss_weight_end, commitment_loss_weight_n)
 
-            sample_codebook_temp=sample_codebook_temp,
-            commitment_weight=commitment_weight,
-        ).to(torch.float32).to(device)
+    lfq_entropy_loss_start = 5e-0
+    lfq_entropy_loss_n = max_iters
+    lfq_entropy_loss_end = 1e-4
+    lfq_decay_fn = get_decay_fn(lfq_entropy_loss_start, lfq_entropy_loss_end, lfq_entropy_loss_n)
 
-#        vq_model = vector_quantize_pytorch.LFQ(
-#                dim=feature_channels,
-#                codebook_size=codebook_size,
-#                num_codebooks=heads,
-#            )
+    sample_codebook_temp= 1.0
+
+
+    def get_model(codebook_size, heads, patch_size, vq_type, ):
+        if vq_type=="lfq":
+            vq_model = vector_quantize_pytorch.LFQ(
+                    dim=feature_channels,
+                    codebook_size=codebook_size,
+                    num_codebooks=heads,
+                    entropy_loss_weight=lfq_entropy_loss_start,
+                    commitment_loss_weight=commitment_loss_weight_start,
+                )
+            vq_callables = [lambda i: {"entropy_loss_weight":lfq_decay_fn(i),"commitment_loss_weight":commitment_loss_weight_fn(i)} ]
+        elif vq_type == "vq":
+            vq_model = vector_quantize_pytorch.VectorQuantize(
+                feature_channels,
+                codebook_size=codebook_size,
+                codebook_dim=codebook_dim,
+                threshold_ema_dead_code=threshold_ema_dead_code,
+                heads=heads,
+                channel_last=True,
+                accept_image_fmap=False,
+                use_cosine_sim=use_cosine_sim,
+                kmeans_init=True,
+                kmeans_iters=20,
+                separate_codebook_per_head=False,
+
+                learnable_codebook=learnable_codebook,
+                ema_update=not learnable_codebook,
+                affine_param=learnable_codebook,
+                straight_through=straight_through,
+                affine_param_batch_decay = 0.99,
+                affine_param_codebook_decay = 0.9,
+                sync_update_v=sync_update_v,
+
+                sample_codebook_temp=sample_codebook_temp,
+                commitment_weight=commitment_loss_weight_start,
+            ).to(torch.float32).to(device)
+            vq_callables = [lambda i: {"entropy_loss_weight":lfq_decay_fn(i),"commitment_weight":commitment_loss_weight_fn(i)} ]
+
 
         proc = DCTProcessor(
             channels=image_channels,
@@ -324,60 +362,80 @@ def main(
 
         model.vq_model = model.vq_model.to(torch.float32)
 
-        return model, proc
+        return model, proc, vq_callables
 
-    codebook_size = 256
+    codebook_size = 512
 
     #    for codebook_size in codebook_sizes:
     #        for heads in head_numbers:
-    for learning_rate in [1e-4]:
-        for patch_size in [12]:
-            heads = 16
-            autoencoder, processor = get_model(codebook_size, heads, patch_size)
+    for learning_rate in [5e-5, 1e-4, 5e-4]:
+        for patch_size in [8, 16]:
+            for vq_type in ["lfq",]:
+                for heads in [16]:
+                    autoencoder, processor, vq_callables = get_model(codebook_size, heads, patch_size, vq_type, )
 
-            ds_train = load_and_transform_dataset(
-                image_dataset_path_or_url,
-                processor,
-            )
+                    ds_train = load_and_transform_dataset(
+                        image_dataset_path_or_url,
+                        processor,
+                    )
 
-            run_d = dict(
-                codebook_size=codebook_size,
-                heads=heads,
-                image_channels=image_channels,
-                dct_compression_factor=dct_compression_factor,
-                max_n_patches=max_n_patches,
-                depth=depth,
-                bits=heads * math.log2(codebook_size),
-                feature_dim=feature_channels,
-                patch_size=patch_size,
-                learning_rate=learning_rate,
-                codebook_dim=codebook_dim,
-                sample_codebook_temp =sample_codebook_temp,
-                commitment_weight=commitment_weight,
-                threshold_ema_dead_code=threshold_ema_dead_code,
-                warmup_steps=warmup_steps,
-            )
+                    bits = heads * math.log2(codebook_size) * max_seq_len
 
-            print("starting run: ", run_d)
+                    run_d = dict(
+                        codebook_size=codebook_size,
+                        heads=heads,
+                        image_channels=image_channels,
+                        dct_compression_factor=dct_compression_factor,
+                        max_n_patches=max_n_patches,
+                        depth=depth,
+                        bits= bits,
+                        use_cosine_sim=use_cosine_sim,
+                        compression_over_patches=max_seq_len * image_channels * patch_size * patch_size / bits,
+                        compression_over_image=256 ** 2 * image_channels/bits,
+                        feature_dim=feature_channels,
+                        patch_size=patch_size,
+                        learning_rate=learning_rate,
+                        codebook_dim=codebook_dim,
+                        sample_codebook_temp =sample_codebook_temp,
+                        commitment_loss_weight_start=commitment_loss_weight_start,
+                        commitment_loss_weight_end=commitment_loss_weight_end,
+                        commitment_loss_weight_n=commitment_loss_weight_n,
+                        threshold_ema_dead_code=threshold_ema_dead_code,
+                        warmup_steps=warmup_steps,
+                        straight_through=straight_through,
+                        sync_update_v=sync_update_v,
+                        learnable_codebook=learnable_codebook,
+                        vq_type=vq_type,
+                        lfq_entropy_loss_start=lfq_entropy_loss_start,
+                        lfq_entropy_loss_end=lfq_entropy_loss_end,
+                        lfq_entropy_loss_n=lfq_entropy_loss_n,
+                    )
 
-            if use_wandb:
-                wandb.init(project="vq-experiments", config=run_d)
+                    print("starting run: ", run_d)
 
-            autoencoder = train(
-                autoencoder,
-                ds_train,
-                device=device,
-                dtype=dtype,
-                batch_size=batch_size,
-                use_wandb=use_wandb,
-                train_norm_iters=train_norm_iters,
-                warmup_steps=warmup_steps,
-            )
+                    if use_wandb:
+                        wandb.init(project="vq-experiments", config=run_d)
 
-            autoencoder = None
+                    try:
+                        autoencoder = train(
+                            autoencoder,
+                            ds_train,
+                            device=device,
+                            dtype=dtype,
+                            batch_size=batch_size,
+                            use_wandb=use_wandb,
+                            train_norm_iters=train_norm_iters,
+                            warmup_steps=warmup_steps,
+                            max_steps=max_iters,
+                            vq_callables=vq_callables,
+                        )
+                    except Exception as e:
+                        print("training run crashed", e)
 
-            if use_wandb:
-                wandb.finish()
+                    autoencoder = None
+
+                    if use_wandb:
+                        wandb.finish()
 
 
 if __name__ == "__main__":

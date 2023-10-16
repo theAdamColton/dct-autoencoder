@@ -1,11 +1,9 @@
-from typing import List
 import torch.nn.functional as F
 import torch
 import torch.nn as nn
 from x_transformers import Encoder
 
 from .dct_processor import DCTPatches, DCTProcessor
-from .na_vit import NaViT, FeedForward
 from .util import (
     calculate_perplexity,
 )
@@ -18,7 +16,6 @@ class DCTAutoencoder(nn.Module):
         image_channels: int = 3,
         depth: int = 4,
         feature_channels: int = 1024,
-        mlp_dim:int = 2048,
         patch_size: int = 32,
         max_n_patches: int = 512,
         dct_processor: DCTProcessor = None,
@@ -35,18 +32,6 @@ class DCTAutoencoder(nn.Module):
         self.feature_channels = feature_channels
         self.max_n_patches = max_n_patches
 
-#        self.encoder = NaViT(
-#            image_size=max_n_patches * patch_size,
-#            patch_size=patch_size,
-#            dim=feature_channels,
-#            depth=depth,
-#            heads=8,
-#            channels=image_channels,
-#            mlp_dim=mlp_dim,
-#            dropout=0.1,
-#            emb_dropout=0.1,
-#        )
-
         patch_dim = image_channels * (patch_size**2)
 
         pos_dim = patch_dim if pos_embed_before_proj else feature_channels
@@ -57,7 +42,7 @@ class DCTAutoencoder(nn.Module):
 
         self.to_patch_embedding = nn.Sequential(
             #nn.LayerNorm(patch_dim),
-            nn.Linear(patch_dim, feature_channels),
+            nn.Linear(patch_dim, feature_channels, bias=False),
             nn.LayerNorm(feature_channels),
         )
 
@@ -66,18 +51,26 @@ class DCTAutoencoder(nn.Module):
                 depth=depth,
                 heads=16,
                 attn_flash = True,
-                #use_rmsnorm = True,
                 ff_glu = True,
                 ff_no_bias = True,
-                #attn_one_kv_head = True,
                 sandwich_norm = True,
             )
 
         self.vq_model = vq_model
 
+        self.decoder = Encoder(
+            dim=feature_channels,
+            depth=depth,
+            heads=16,
+            attn_flash = True,
+            ff_glu = True,
+            ff_no_bias = True,
+            sandwich_norm = True,
+                )
+
         self.proj_out = nn.Sequential(
             nn.LayerNorm(feature_channels),
-            nn.Linear(feature_channels, image_channels * patch_size**2),
+            nn.Linear(feature_channels, image_channels * patch_size**2, bias=False),
         )
         
 
@@ -132,6 +125,8 @@ class DCTAutoencoder(nn.Module):
 
         with torch.no_grad():
             perplexity = calculate_perplexity(codes[mask], self.codebook_size)
+
+        dct_patches.patches = self.decoder(dct_patches.patches)
 
         dct_patches.patches = self.proj_out(dct_patches.patches)
 
