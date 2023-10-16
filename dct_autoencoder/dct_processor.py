@@ -69,7 +69,7 @@ v
 
 """
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import Callable, List, Tuple
 from functools import partial
 from einops import rearrange
 import torch
@@ -118,7 +118,7 @@ class DCTProcessor:
         self,
         channels: int,
         patch_size: int,
-        dct_compression_factor: float,
+        sample_patches: Callable[[], float],
         max_n_patches: int,
         max_seq_len: int,
         max_batch_size:int,
@@ -127,7 +127,7 @@ class DCTProcessor:
     ):
         self.channels = channels
         self.patch_size = patch_size
-        self.dct_compression_factor = dct_compression_factor
+        self.sample_patches = sample_patches
         self.max_n_patches = max_n_patches
         self.max_res = patch_size * max_n_patches
         self.max_seq_len = max_seq_len
@@ -151,13 +151,19 @@ class DCTProcessor:
 
     @torch.no_grad()
     def _transform_image_in(self, x):
+        """
+        x is a image tensor, with values between 0.0 and 1.0
+        """
         og_dtype = x.dtype
         return dct2(x.to(torch.float32), 'ortho').to(og_dtype)
 
     @torch.no_grad()
     def _transform_image_out(self, x):
         og_dtype = x.dtype
-        return idct2(x.to(torch.float32), 'ortho').to(og_dtype)
+        image = idct2(x.to(torch.float32), 'ortho').to(og_dtype)
+        # TODO clamp
+        image = image.clamp(0.0, 1.0)
+        return image
             
 
     @torch.no_grad()
@@ -195,7 +201,7 @@ class DCTProcessor:
         batch the result of preprocess
         """
         patches, positions = self._group_patches_by_max_seq_len(patches, positions)
-        return self._batch_groups(patches, positions, original_sizes=original_sizes, patch_sizes=patch_sizes)
+        return self._batch_groups(patches, positions, original_sizes=original_sizes, patch_sizes=patch_sizes, device=device)
 
 
     @torch.no_grad()
@@ -225,27 +231,6 @@ class DCTProcessor:
         # p_h, p_w, number of patches in height and width
         p_h = int(h / self.patch_size)
         p_w = int(w / self.patch_size)
-        p_h = max(p_h, 1)
-        p_w = max(p_w, 1)
-
-        # crops p_h and p_w to p_h_c and p_w_c such that
-        # ar = p_h_c / p_w_c = p_h / p_w
-        # p_h_c * p_w_c <= self.max_n_patches
-        #
-        # ar * p_w_c <= self.max_n_patches / p_w_c
-        # ar * p_w_c ** 2 <= self.max_n_patches
-        # p_w_c = sqrt(self.max_n_patches / ar)
-        # p_h_c = ar * p_w_c
-        ar = p_h / p_w
-        p_w_c = int((self.max_n_patches / ar) ** 0.5)
-        p_h_c = int(ar * p_w_c)
-
-        assert p_h_c * p_w_c <= self.max_n_patches
-
-        p_h = min(p_h, p_h_c)
-        p_w = min(p_w, p_w_c)
-        p_h = max(p_h, 1)
-        p_w = max(p_w, 1)
 
         # crop height and crop width
         c_h = p_h * self.patch_size
@@ -255,8 +240,6 @@ class DCTProcessor:
         assert c_w % self.patch_size == 0
         assert c_h <= h
         assert c_w <= w
-        assert c_h <= self.max_res
-        assert c_w <= self.max_res
         assert c_h >= self.patch_size
         assert c_w >= self.patch_size
 
@@ -289,17 +272,18 @@ class DCTProcessor:
 
         ph, pw = h//self.patch_size, w//self.patch_size
 
-        h_indices, w_indices = torch.meshgrid(torch.arange(ph), torch.arange(pw), indexing='ij')
+        h_indices, w_indices = torch.meshgrid(torch.arange(ph, device=x.device), torch.arange(pw, device=x.device), indexing='ij')
 
         # distances from upper left corner
         tri_distances = (h_indices + w_indices) * 1.0
 
         # takes the top p closest distances
-        p = 1-self.dct_compression_factor
+        p = min(max(self.sample_patches(), 0.01), 1.0)
         _, indices_flat = tri_distances.view(-1).sort()
         k = round(len(indices_flat) * p)
         k = max(1, k)
         k = min(len(indices_flat), k)
+        k = min(k, self.max_n_patches)
         indices_flat = indices_flat[:k]
 
         # patches x into a list of patches

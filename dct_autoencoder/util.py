@@ -3,6 +3,22 @@ import torch
 from torch import nn
 import matplotlib.pyplot as plt
 from torch_dct import dct_2d, idct_2d
+import random
+
+def uniform(a:float, b:float) -> float:
+    x = random.random() 
+    if a > b:
+        tmp = a
+        a = b
+        b = tmp
+    return x * (b-a) + a
+
+def power_of_two(target:int) -> int:
+    if target > 1:
+        for i in range(1, int(target)):
+            if (2 ** i >= target):
+                return 2 ** i
+    return 1
 
 
 def divisible_by(numer, denom):
