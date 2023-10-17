@@ -254,12 +254,12 @@ def load_and_transform_dataset(
 
     ds = (
         wds.WebDataset(dataset_name_or_url)
-        .map_dict(json=json.loads)
-        .select(filter_res)
+        .map_dict(json=json.loads, handler=wds.handlers.warn_and_continue)
+        .select(filter_res,)
         .decode("torchrgb", partial=True, handler=wds.handlers.warn_and_continue)
-        .rename(pixel_values="jpg")
-        .map(preproc)
-        .rename_keys(patches="patches", positions="positions", original_sizes="original_sizes", patch_sizes="patch_sizes")
+        .rename(pixel_values="jpg", handler=wds.handlers.warn_and_continue)
+        .map(preproc, handler=wds.handlers.warn_and_continue)
+        .rename_keys(patches="patches", positions="positions", original_sizes="original_sizes", patch_sizes="patch_sizes",)
     )  # drops old columns
 
     return ds
@@ -276,19 +276,19 @@ def main(
     train_norm_iters: int = 10,
     max_iters:int = 1000,
     # makes the images more colorful
-    channel_diversity_loss_coeff:float=1e1,
+    channel_diversity_loss_coeff:float=5e0,
 ):
 
 
     image_channels: int = 3
     if max_batch_size is None:
         max_batch_size = batch_size
-    depth = 3
+    depth = 4
     warmup_steps = 50
 
 
     codebook_dim=32
-    codebook_size = 2048
+    codebook_size = 4096
     threshold_ema_dead_code=5
     straight_through=True
     sync_update_v=0.01
@@ -379,17 +379,17 @@ def main(
         return model, proc, vq_callables
 
     max_total_codes = 4096
-    patch_size = 6
+    patch_size = 4
     vq_type = "lfq"
 
-    heads = patch_size
+    heads = 8
     max_n_patches = max_total_codes // heads
     max_seq_len = power_of_two(max_n_patches)
     _input_features = image_channels * patch_size ** 2
     feature_channels: int = max(64, power_of_two(_input_features))
     feature_channels = min(feature_channels, 2048)
 
-    for learning_rate in [4e-5,]:
+    for learning_rate in [1e-4,]:
         autoencoder, processor, vq_callables = get_model(codebook_size, heads, patch_size, vq_type,)
 
         ds_train = load_and_transform_dataset(
@@ -448,6 +448,8 @@ def main(
             max_steps=max_iters,
             vq_callables=vq_callables,
         )
+
+        torch.save(autoencoder, OUTDIR + "/autoencoder.pt")
 
         autoencoder = None
 
