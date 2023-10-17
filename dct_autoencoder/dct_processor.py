@@ -80,11 +80,7 @@ from torch.nn.utils.rnn import pad_sequence as orig_pad_sequence
 from .norm import PatchNorm
 from .util import (
     dct2,
-    always,
-    exists,
-    default,
     idct2,
-    divisible_by,
 )
 
 
@@ -96,6 +92,7 @@ class DCTPatches:
     w_indices: torch.LongTensor
     attn_mask: torch.BoolTensor
     batched_image_ids: torch.LongTensor
+    # b,s,2
     patch_positions: torch.LongTensor
     # ph, pw of the patches
     patch_sizes: List[Tuple]
@@ -132,7 +129,7 @@ class DCTProcessor:
         self.max_res = patch_size * max_n_patches
         self.max_seq_len = max_seq_len
         self.patch_norm = PatchNorm(
-            max_n_patches, max_n_patches, patch_size**2 * channels
+            max_n_patches, max_n_patches, patch_size, channels,
         ).to(patch_norm_device)
         self.max_batch_size = max_batch_size
 

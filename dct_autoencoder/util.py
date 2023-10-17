@@ -4,6 +4,11 @@ from torch import nn
 import matplotlib.pyplot as plt
 from torch_dct import dct_2d, idct_2d
 import random
+import math
+
+def exp_dist(a: float) -> float:
+    x = random.random()
+    return -1 / a * math.log(x)
 
 def uniform(a:float, b:float) -> float:
     x = random.random() 

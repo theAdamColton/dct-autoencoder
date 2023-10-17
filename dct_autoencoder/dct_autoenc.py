@@ -1,3 +1,4 @@
+from einops import rearrange
 import torch.nn.functional as F
 import torch
 import torch.nn as nn
@@ -21,12 +22,15 @@ class DCTAutoencoder(nn.Module):
         dct_processor: DCTProcessor = None,
         codebook_size: int = None,
         pos_embed_before_proj: bool = True,
+        # this is a loss coeff that penalizes making the same prediction across all dct channels
+        channel_diversity_loss_coeff:float = 1e-1,
     ):
         """
         input_res: the square integer input resolution size.
         """
         super().__init__()
 
+        self.channel_diversity_loss_coeff = channel_diversity_loss_coeff
         self.image_channels = image_channels
         self.patch_size = patch_size
         self.feature_channels = feature_channels
@@ -41,7 +45,7 @@ class DCTAutoencoder(nn.Module):
 
 
         self.to_patch_embedding = nn.Sequential(
-            #nn.LayerNorm(patch_dim),
+            nn.LayerNorm(patch_dim),
             nn.Linear(patch_dim, feature_channels, bias=False),
             nn.LayerNorm(feature_channels),
         )
@@ -121,6 +125,7 @@ class DCTAutoencoder(nn.Module):
         # update
         #dct_patches.patches = dct_patches.patches.to(torch.float32)
         dct_patches.patches, codes, commit_loss = self.vq_model(dct_patches.patches)#, mask=mask)
+        commit_loss= commit_loss.mean()
         #dct_patches.patches = dct_patches.patches.to(dct_normalized_patches.dtype)
 
         with torch.no_grad():
@@ -130,8 +135,27 @@ class DCTAutoencoder(nn.Module):
 
         dct_patches.patches = self.proj_out(dct_patches.patches)
 
-        # loss between z and normalized patches
         rec_loss = F.mse_loss(dct_patches.patches[mask], dct_normalized_patches[mask])
+
+        if self.channel_diversity_loss_coeff > 0.0:
+            def pull_out_channels(x):
+                return rearrange(x, '... (c p1 p2) -> ... c (p1 p2)', c = self.image_channels, p1=self.patch_size, p2=self.patch_size)
+
+            # normalize the reconstructed dct patches by subtracting the mean
+            # In essence, this removes the grayscale information from the image.
+            # For channel_diversity_loss, we don't care about getting the right grayscale 
+            # cross-channel intensities.
+            # We instead care about getting the right variation across
+            # channels, per pixel.
+            patch_hats = pull_out_channels(dct_patches.patches)[mask]
+            patch = pull_out_channels(dct_normalized_patches)[mask]
+
+            channel_diversity_loss = F.mse_loss(
+                    patch - patch.mean(dim=-2, keepdim=True),
+                    patch_hats - patch_hats.mean(dim=-2, keepdim=True),
+            ) * self.channel_diversity_loss_coeff
+        else:
+            channel_diversity_loss = 0.0
 
         if not decode:
             return dict(
@@ -139,6 +163,7 @@ class DCTAutoencoder(nn.Module):
                 commit_loss=commit_loss,
                 rec_loss=rec_loss,
                 codes=codes,
+                channel_diversity_loss=channel_diversity_loss,
             )
     
 
@@ -165,7 +190,8 @@ class DCTAutoencoder(nn.Module):
             perplexity=perplexity,
             commit_loss=commit_loss,
             rec_loss=rec_loss,
+            pixel_loss=pixel_loss,
+            channel_diversity_loss=channel_diversity_loss,
             codes=codes,
             x=images,
-            pixel_loss=pixel_loss,
         )

@@ -15,7 +15,7 @@ import json
 import wandb
 
 
-from dct_autoencoder.util import power_of_two, uniform
+from dct_autoencoder.util import exp_dist, power_of_two, uniform
 from dct_autoencoder.dct_processor import DCTPatches, DCTProcessor
 from dct_autoencoder.dct_autoenc import DCTAutoencoder
 
@@ -174,19 +174,15 @@ def train(
                 image = make_image_grid(
                     out["x"], out["x_hat"], filename=f"{OUTDIR}/train image {i:04}.png"
                 )
-                log_d = {
-                    "train": dict(
-                        epoch=epoch,
-                        step=i,
-                        image=wandb.Image(image),
-                        pixel_loss=out["pixel_loss"].item(),
-                        rec_loss=out["rec_loss"].item(),
+                log_d = dict(
+                    epoch=epoch,
+                    image=wandb.Image(image),
+                    **{k:v.item() for k, v in out.items() if "loss" in k}
                     )
-                }
                 print("log:", log_d)
 
                 if use_wandb:
-                    wandb.log(log_d)
+                    wandb.log({'generation':log_d}, step=i)
                 out = None
 
             optimizer.zero_grad()
@@ -196,9 +192,10 @@ def train(
                 decode=False,
             )
 
-            commit_loss = out["commit_loss"].mean()
-
-            loss = out["rec_loss"] + commit_loss
+            loss = 0.0
+            for k,v in out.items():
+                if "loss" in k:
+                    loss += v
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(autoencoder.parameters(), 5.0)
@@ -206,13 +203,10 @@ def train(
 
             log_dict = dict(
                             epoch=epoch,
-                            step=i,
-                            loss=loss.item(),
-                            rec_loss=out["rec_loss"].item(),
-                            commit_loss=commit_loss.item(),
                             perplexity=out["perplexity"].item(),
                             batch_len=batch_len,
                             seq_len=seq_len,
+                            **{k:v.item() for k, v in out.items() if "loss" in k}
             )
 
             for fn in vq_callables:
@@ -226,7 +220,8 @@ def train(
                 wandb.log(
                     {
                         "train": log_dict
-                    }
+                    },
+                    step=i,
                 )
 
             if n_steps > max_steps:
@@ -279,15 +274,18 @@ def main(
     num_workers:int=0,
     use_wandb: bool = False,
     train_norm_iters: int = 10,
+    max_iters:int = 1000,
+    # makes the images more colorful
+    channel_diversity_loss_coeff:float=1e1,
 ):
-    max_iters = 5000
 
 
     image_channels: int = 3
     if max_batch_size is None:
         max_batch_size = batch_size
-    depth = 2
+    depth = 3
     warmup_steps = 50
+
 
     codebook_dim=32
     codebook_size = 2048
@@ -356,7 +354,7 @@ def main(
         proc = DCTProcessor(
             channels=image_channels,
             patch_size=patch_size,
-            sample_patches=lambda : uniform(0.05, 1.0),
+            sample_patches=lambda : max(min(exp_dist(3.0), 1.0), 0.01),
             max_n_patches=max_n_patches,
             max_seq_len=max_seq_len,
             max_batch_size=max_batch_size,
@@ -372,6 +370,7 @@ def main(
                 max_n_patches=max_n_patches,
                 dct_processor=proc,
                 codebook_size=codebook_size,
+                channel_diversity_loss_coeff=channel_diversity_loss_coeff,
             )
             .to(dtype)
             .to(device)
@@ -380,82 +379,80 @@ def main(
         return model, proc, vq_callables
 
     max_total_codes = 4096
+    patch_size = 6
+    vq_type = "lfq"
 
-    #    for codebook_size in codebook_sizes:
-    #        for heads in head_numbers:
-    for vq_type in ["lfq",]:
-        for patch_size in [6,]:# 8, 16, ]:
-            heads = patch_size
-            max_n_patches = max_total_codes // heads
-            max_seq_len = power_of_two(max_n_patches)
-            _input_features = image_channels * patch_size ** 2
-            feature_channels: int = max(64, power_of_two(_input_features))
-            feature_channels = min(feature_channels, 2048)
+    heads = patch_size
+    max_n_patches = max_total_codes // heads
+    max_seq_len = power_of_two(max_n_patches)
+    _input_features = image_channels * patch_size ** 2
+    feature_channels: int = max(64, power_of_two(_input_features))
+    feature_channels = min(feature_channels, 2048)
 
-            for learning_rate in [4e-5,]:
-                autoencoder, processor, vq_callables = get_model(codebook_size, heads, patch_size, vq_type, )
+    for learning_rate in [4e-5,]:
+        autoencoder, processor, vq_callables = get_model(codebook_size, heads, patch_size, vq_type,)
 
-                ds_train = load_and_transform_dataset(
-                    image_dataset_path_or_url,
-                    processor,
-                    device=device if num_workers == 0 else 'cpu',
-                )
+        ds_train = load_and_transform_dataset(
+            image_dataset_path_or_url,
+            processor,
+            device=device if num_workers == 0 else 'cpu',
+        )
 
-                bits = heads * math.log2(codebook_size) * max_seq_len
+        bits = heads * math.log2(codebook_size) * max_seq_len
 
-                run_d = dict(
-                    codebook_size=codebook_size,
-                    heads=heads,
-                    image_channels=image_channels,
-                    max_n_patches=max_n_patches,
-                    max_seq_len=max_seq_len,
-                    depth=depth,
-                    bits= bits,
-                    use_cosine_sim=use_cosine_sim,
-                    compression_over_patches=max_seq_len * image_channels * patch_size * patch_size / bits,
-                    compression_over_image=512 ** 2 * image_channels/bits,
-                    feature_dim=feature_channels,
-                    patch_size=patch_size,
-                    learning_rate=learning_rate,
-                    codebook_dim=codebook_dim,
-                    sample_codebook_temp =sample_codebook_temp,
-                    commitment_loss_weight_start=commitment_loss_weight_start,
-                    commitment_loss_weight_end=commitment_loss_weight_end,
-                    commitment_loss_weight_n=commitment_loss_weight_n,
-                    threshold_ema_dead_code=threshold_ema_dead_code,
-                    warmup_steps=warmup_steps,
-                    straight_through=straight_through,
-                    sync_update_v=sync_update_v,
-                    learnable_codebook=learnable_codebook,
-                    vq_type=vq_type,
-                    lfq_entropy_loss_start=lfq_entropy_loss_start,
-                    lfq_entropy_loss_end=lfq_entropy_loss_end,
-                    lfq_entropy_loss_n=lfq_entropy_loss_n,
-                )
+        run_d = dict(
+            codebook_size=codebook_size,
+            heads=heads,
+            image_channels=image_channels,
+            max_n_patches=max_n_patches,
+            max_seq_len=max_seq_len,
+            depth=depth,
+            bits= bits,
+            use_cosine_sim=use_cosine_sim,
+            compression_over_patches=max_seq_len * image_channels * patch_size * patch_size / bits,
+            compression_over_image=512 ** 2 * image_channels/bits,
+            feature_dim=feature_channels,
+            patch_size=patch_size,
+            learning_rate=learning_rate,
+            codebook_dim=codebook_dim,
+            sample_codebook_temp =sample_codebook_temp,
+            commitment_loss_weight_start=commitment_loss_weight_start,
+            commitment_loss_weight_end=commitment_loss_weight_end,
+            commitment_loss_weight_n=commitment_loss_weight_n,
+            threshold_ema_dead_code=threshold_ema_dead_code,
+            warmup_steps=warmup_steps,
+            straight_through=straight_through,
+            sync_update_v=sync_update_v,
+            learnable_codebook=learnable_codebook,
+            vq_type=vq_type,
+            lfq_entropy_loss_start=lfq_entropy_loss_start,
+            lfq_entropy_loss_end=lfq_entropy_loss_end,
+            lfq_entropy_loss_n=lfq_entropy_loss_n,
+        )
 
-                print("starting run: ", run_d)
+        print("starting run: ", run_d)
 
-                if use_wandb:
-                    wandb.init(project="vq-experiments", config=run_d)
+        if use_wandb:
+            wandb.init(project="vq-experiments", config=run_d)
 
-                autoencoder = train(
-                    autoencoder,
-                    ds_train,
-                    device=device,
-                    dtype=dtype,
-                    batch_size=batch_size,
-                    use_wandb=use_wandb,
-                    train_norm_iters=train_norm_iters,
-                    warmup_steps=warmup_steps,
-                    num_workers=num_workers,
-                    max_steps=max_iters,
-                    vq_callables=vq_callables,
-                )
+        autoencoder = train(
+            autoencoder,
+            ds_train,
+            device=device,
+            dtype=dtype,
+            batch_size=batch_size,
+            use_wandb=use_wandb,
+            train_norm_iters=train_norm_iters,
+            warmup_steps=warmup_steps,
+            num_workers=num_workers,
+            max_steps=max_iters,
+            vq_callables=vq_callables,
+        )
 
-                autoencoder = None
+        autoencoder = None
 
-                if use_wandb:
-                    wandb.finish()
+        if use_wandb:
+            wandb.finish()
 
 
 if __name__ == "__main__":
