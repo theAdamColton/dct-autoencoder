@@ -67,23 +67,31 @@ v
 2d image Shape: (c, h, w)
 """
 
-from typing import Callable, List, Tuple
+from dataclasses import dataclass
+from typing import List, Optional
 from functools import partial
 from einops import rearrange
 import torch
 from torch import Tensor
 import torch.nn.functional as F
-from torch.nn.utils.rnn import pad_sequence as orig_pad_sequence
 from transformers.feature_extraction_utils import FeatureExtractionMixin
 
-from .patchnorm import PatchNorm
 from .dct_patches import DCTPatches
 from .util import (
     dct2,
+    exp_dist,
     idct2,
+    pad_sequence,
 )
 
 
+@dataclass
+class GroupPatchesState:
+    groups: List[List[Tensor]]
+    groups_pos: List[List[Tensor]]
+    group: List[Tensor]
+    group_pos: List[Tensor]
+    seq_len: int
 
 class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
     feature_extractor_class = "DCTAutoencoderProcessor"
@@ -93,14 +101,14 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         self,
         channels: int,
         patch_size: int,
-        sample_patches: Callable[[], float],
+        sample_patches_beta: float,
         max_n_patches: int,
         max_seq_len: int,
         token_dropout_prob=None,
     ):
         self.channels = channels
         self.patch_size = patch_size
-        self.sample_patches = sample_patches
+        self.sample_patches_beta = sample_patches_beta
         self.max_n_patches = max_n_patches
         self.max_res = patch_size * max_n_patches
         self.max_seq_len = max_seq_len
@@ -165,12 +173,62 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         return patched_ims, positions, original_sizes, patch_sizes
 
     @torch.no_grad()
-    def batch(self, patches: List[torch.Tensor], positions: List[torch.Tensor], original_sizes: List[Tuple[int,int]], patch_sizes: List[Tuple[int, int]], device='cpu') -> DCTPatches:
+    def iter_batches(self, dataloader, batch_size: int = 32):
         """
-        batch the result of preprocess
+        dataloader: iterable, returns [patches, positions, original_sizes, patch_sizes]
         """
-        patches, positions = self._group_patches_by_max_seq_len(patches, positions)
-        return self._batch_groups(patches, positions, original_sizes=original_sizes, patch_sizes=patch_sizes, device=device)
+
+        state = None
+        cum_original_sizes = []
+        cum_patch_sizes = []
+        while True:
+            # TODO catch iter
+            patches, positions, original_sizes, patch_sizes = next(dataloader)
+
+            cum_original_sizes = cum_original_sizes + original_sizes
+            cum_patch_sizes = cum_patch_sizes + patch_sizes
+
+            state = self._group_patches_by_max_seq_len(patches, positions, state)
+            cur_batch_size = len(state.groups)
+
+
+            if cur_batch_size > batch_size:
+                # clips state
+                new_state = GroupPatchesState(
+                        groups=state.groups[batch_size:],
+                        groups_pos = state.groups_pos[batch_size:],
+                        group=state.group,
+                        group_pos=state.group_pos,
+                        seq_len=state.seq_len,
+                )
+                state = GroupPatchesState(
+                        groups=state.groups[:batch_size],
+                        groups_pos = state.groups_pos[:batch_size],
+                        group=[],
+                        group_pos=[],
+                        seq_len=0,
+                        )
+
+                n_items_in_batch = sum(len(x) for x in state.groups)
+
+                new_original_sizes = cum_original_sizes[n_items_in_batch:]
+                new_patch_sizes = cum_patch_sizes[n_items_in_batch:]
+                cum_original_sizes = cum_original_sizes[:n_items_in_batch]
+                cum_patch_sizes = cum_patch_sizes[:n_items_in_batch]
+
+                batch = self._batch_groups(state.groups, state.groups_pos, original_sizes = cum_original_sizes, patch_sizes = cum_patch_sizes)
+
+                assert batch.patches.shape[0] == batch_size
+                assert batch.key_pad_mask.shape[0] == batch_size
+                assert batch.batched_image_ids.shape[0] == batch_size
+                assert batch.patch_positions.shape[0] == batch_size
+                assert batch.attn_mask.shape[0] == batch_size
+
+                cum_patch_sizes = new_patch_sizes
+                cum_original_sizes = new_original_sizes
+                state = new_state
+
+                yield batch
 
 
     @torch.no_grad()
@@ -251,7 +309,7 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         k = len(indices_flat)
         k = min(k, self.max_n_patches)
         # takes the top p closest distances (that are under self.max_n_patches)
-        p = self.sample_patches()
+        p = max(min(exp_dist(self.sample_patches_beta), 1.0), 0.01)
         k = round(k * p)
         k = max(1, k)
         k = min(self.max_n_patches, k)
@@ -282,15 +340,19 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
             self,
             batched_patches: List[Tensor],
             batched_positions: List[Tensor],
-            ) -> Tuple[List[List[Tensor]], List[List[Tensor]]]:
+            state: Optional[GroupPatchesState]=None,
+            ) -> GroupPatchesState:
         """
-        converts a list of ungrouped flattened patches into batched groups
+        converts a list of ungrouped tensors into batched groups
         """
-        groups = []
-        groups_pos = []
-        group = []
-        group_pos = []
-        seq_len = 0
+        if state is None:
+            groups = []
+            groups_pos = []
+            group = []
+            group_pos = []
+            seq_len = 0
+            state = GroupPatchesState(groups, groups_pos, group, group_pos, seq_len)
+
 
 
         for patches, pos in zip(batched_patches, batched_positions):
@@ -302,22 +364,18 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
             k <= self.max_n_patches and k <= self.max_seq_len
             ), f"patch with len {k} exceeds maximum sequence length"
 
-            if (seq_len + k) > self.max_seq_len:
-                groups.append(group)
-                groups_pos.append(group_pos)
-                group = []
-                group_pos = []
-                seq_len = 0
+            if (state.seq_len + k) > self.max_seq_len:
+                state.groups.append(state.group)
+                state.groups_pos.append(state.group_pos)
+                state.group = []
+                state.group_pos = []
+                state.seq_len = 0
 
-            group.append(patches)
-            group_pos.append(pos)
-            seq_len += k
+            state.group.append(patches)
+            state.group_pos.append(pos)
+            state.seq_len += k
 
-        if len(group) > 0:
-            groups.append(group)
-            groups_pos.append(group_pos)
-
-        return groups, groups_pos
+        return state
 
     @torch.no_grad()
     def _batch_groups(self,
@@ -330,7 +388,7 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         returns a batch of DCTPatches
         """
         arange = partial(torch.arange, device=device)
-        pad_sequence = partial(orig_pad_sequence, batch_first=True)
+
 
         assert len(grouped_batched_positions) == len(grouped_batched_patches)
 
@@ -367,14 +425,14 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
             device=device,
             dtype=torch.long,
         )
-        max_length = arange(lengths.amax().item())
+        max_length = arange(self.max_seq_len)
         key_pad_mask = rearrange(lengths, "b -> b 1") <= rearrange(
             max_length, "n -> 1 n"
         )
 
         # derive attention mask, and combine with key padding mask from above
 
-        batched_image_ids = pad_sequence(batched_image_ids)
+        batched_image_ids = pad_sequence(batched_image_ids, self.max_seq_len)
         attn_mask = rearrange(batched_image_ids, "b i -> b 1 i 1") == rearrange(
             batched_image_ids, "b j -> b 1 1 j"
         )
@@ -382,9 +440,9 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
 
         # combine patched images as well as the patched width / height positions for 2d positional embedding
 
-        patches = pad_sequence(batched_sequences).to(device)
+        patches = pad_sequence(batched_sequences, self.max_seq_len).to(device)
 
-        patch_positions = pad_sequence(batched_positions).to(device)
+        patch_positions = pad_sequence(batched_positions, self.max_seq_len).to(device)
 
         # need to know how many images for final attention pooling
 

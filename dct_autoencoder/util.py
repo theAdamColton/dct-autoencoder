@@ -1,10 +1,26 @@
-from typing import Optional
+import torch.nn.functional as F
+from typing import Optional, List
 import torch
 from torch import nn
 import matplotlib.pyplot as plt
 from torch_dct import dct_2d, idct_2d
 import random
 import math
+
+def pad_sequence(seq:List[torch.Tensor], max_seq_len):
+    """
+    pads the first dim to max_seq_len and stacks
+
+    pads to the right
+    """
+    back_dims = seq[0].shape[1:]
+    b = len(seq)
+    out = torch.zeros((b, max_seq_len, *back_dims), dtype=seq[0].dtype, device=seq[0].device)
+    for i in range(len(seq)):
+        l = seq[i].shape[0]
+        assert l <= max_seq_len
+        out[i,:l] = seq[i]
+    return out
 
 def exp_dist(a: float) -> float:
     x = random.random()
