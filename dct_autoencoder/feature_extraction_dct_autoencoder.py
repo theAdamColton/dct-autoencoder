@@ -65,10 +65,8 @@ v
 v
 
 2d image Shape: (c, h, w)
-
-
 """
-from dataclasses import dataclass
+
 from typing import Callable, List, Tuple
 from functools import partial
 from einops import rearrange
@@ -76,41 +74,21 @@ import torch
 from torch import Tensor
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence as orig_pad_sequence
+from transformers.feature_extraction_utils import FeatureExtractionMixin
 
-from .norm import PatchNorm
+from .patchnorm import PatchNorm
+from .dct_patches import DCTPatches
 from .util import (
     dct2,
     idct2,
 )
 
 
-@dataclass
-class DCTPatches:
-    patches: torch.Tensor
-    key_pad_mask: torch.BoolTensor
-    h_indices: torch.LongTensor
-    w_indices: torch.LongTensor
-    attn_mask: torch.BoolTensor
-    batched_image_ids: torch.LongTensor
-    # b,s,2
-    patch_positions: torch.LongTensor
-    # ph, pw of the patches
-    patch_sizes: List[Tuple]
-    # h,w of the original image pixels
-    original_sizes: List[Tuple]
 
-    def to(self, what):
-        self.patches = self.patches.to(what)
-        self.key_pad_mask = self.key_pad_mask.to(what)
-        self.h_indices = self.h_indices.to(what)
-        self.w_indices = self.w_indices.to(what)
-        self.attn_mask = self.attn_mask.to(what)
-        self.batched_image_ids = self.batched_image_ids.to(what)
-        self.patch_positions = self.patch_positions.to(what)
-        return self
+class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
+    feature_extractor_class = "DCTAutoencoderProcessor"
+    tokenizer_class = None
 
-
-class DCTProcessor:
     def __init__(
         self,
         channels: int,
@@ -118,8 +96,6 @@ class DCTProcessor:
         sample_patches: Callable[[], float],
         max_n_patches: int,
         max_seq_len: int,
-        max_batch_size:int,
-        patch_norm_device="cpu",
         token_dropout_prob=None,
     ):
         self.channels = channels
@@ -128,10 +104,6 @@ class DCTProcessor:
         self.max_n_patches = max_n_patches
         self.max_res = patch_size * max_n_patches
         self.max_seq_len = max_seq_len
-        self.patch_norm = PatchNorm(
-            max_n_patches, max_n_patches, patch_size, channels,
-        ).to(patch_norm_device)
-        self.max_batch_size = max_batch_size
 
         # what percent of tokens to dropout
         # if int or float given, then assume constant dropout prob
@@ -144,7 +116,7 @@ class DCTProcessor:
         elif isinstance(token_dropout_prob, (float, int)):
             assert 0.0 < token_dropout_prob < 1.0
             token_dropout_prob = float(token_dropout_prob)
-            self.calc_token_dropout = lambda height, width: token_dropout_prob
+            self.calc_token_dropout = lambda *_: token_dropout_prob
 
     @torch.no_grad()
     def _transform_image_in(self, x):
@@ -173,11 +145,11 @@ class DCTProcessor:
         original_sizes = []
         for im in x:
             im = self._transform_image_in(im)
-            c,h,w = im.shape
+            _,h,w = im.shape
             original_sizes.append((h,w))
 
             cropped_im = self._crop_image(im)
-            c,ch,cw = cropped_im.shape
+            _,ch,cw = cropped_im.shape
 
             ph, pw = ch // self.patch_size, cw//self.patch_size
             patch_sizes.append((ph, pw))
@@ -312,10 +284,7 @@ class DCTProcessor:
             batched_positions: List[Tensor],
             ) -> Tuple[List[List[Tensor]], List[List[Tensor]]]:
         """
-        converts a list of ungrouped flattened patches
-        into batched groups, such that the total number of batches is less than
-        self.max_batch_size and the length of any sequence of the batches is less than
-        self.max_seq_len.
+        converts a list of ungrouped flattened patches into batched groups
         """
         groups = []
         groups_pos = []
@@ -324,7 +293,7 @@ class DCTProcessor:
         seq_len = 0
 
 
-        for i, (patches, pos) in enumerate(zip(batched_patches, batched_positions)):
+        for patches, pos in zip(batched_patches, batched_positions):
             assert isinstance(patches, Tensor)
 
             k, _ = patches.shape
@@ -343,9 +312,6 @@ class DCTProcessor:
             group.append(patches)
             group_pos.append(pos)
             seq_len += k
-
-            if len(groups) >= self.max_batch_size:
-                print(f"Warning! Truncating {len(batched_patches) - i + 1} images from batch to reach batch size of {self.max_batch_size}")
 
         if len(group) > 0:
             groups.append(group)
@@ -424,13 +390,9 @@ class DCTProcessor:
 
         num_images = torch.tensor(num_images, device=device, dtype=torch.long)
 
-        h_indices, w_indices = patch_positions.unbind(dim=-1)
-
         return DCTPatches(
             patches=patches,
             key_pad_mask=key_pad_mask,
-            h_indices=h_indices,
-            w_indices=w_indices,
             attn_mask=attn_mask,
             batched_image_ids=batched_image_ids,
             patch_positions=patch_positions,

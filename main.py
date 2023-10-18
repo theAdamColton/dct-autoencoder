@@ -1,8 +1,6 @@
-from typing import Callable, List, Optional
+from typing import Callable, List
 from tqdm import tqdm
 import torch
-from torch import nn
-import vector_quantize_pytorch
 import webdataset as wds
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
@@ -13,22 +11,19 @@ import math
 import time
 import json
 import wandb
+import random
 
+from dct_autoencoder.feature_extraction_dct_autoencoder import DCTAutoencoderFeatureExtractor
+from dct_autoencoder.patchnorm import PatchNorm
+from dct_autoencoder.util import exp_dist, power_of_two
+from dct_autoencoder.dct_patches import DCTPatches
+from dct_autoencoder.modeling_dct_autoencoder import DCTAutoencoder
+from dct_autoencoder.configuration_dct_autoencoder import DCTAutoencoderConfig
 
-from dct_autoencoder.util import exp_dist, power_of_two, uniform
-from dct_autoencoder.dct_processor import DCTPatches, DCTProcessor
-from dct_autoencoder.dct_autoenc import DCTAutoencoder
 
 OUTDIR = f"out/{time.ctime()}/"
 
 os.makedirs(OUTDIR, exist_ok=True)
-
-
-class DummyVQ(nn.Module):
-    def __init__(self, *args, **kwargs):
-        super().__init__()
-    def forward(self, x, **kwargs):
-        return x, torch.zeros_like(x, dtype=torch.long), torch.zeros(1, device=x.device, dtype=x.dtype) 
 
 def get_decay_fn(start_val:float, end_value:float, n:int):
     def fn(i: int):
@@ -37,7 +32,7 @@ def get_decay_fn(start_val:float, end_value:float, n:int):
         return ((n-i) / n) * start_val + (i/n) * end_value
     return fn
 
-def get_collate_fn(processor: DCTProcessor,):
+def get_collate_fn(processor: DCTAutoencoderFeatureExtractor):
     def collate(x: List[dict]):
         patches = []
         positions = []
@@ -81,8 +76,96 @@ def make_image_grid(x, x_hat, filename=None, n: int = 10, max_size: int = 1024):
     return im
 
 
+def train_step(
+           batch: DCTPatches,
+           autoencoder: DCTAutoencoder,
+           proc: DCTAutoencoderFeatureExtractor,
+           max_batch_n = None,
+           decode_pixels=False,
+           return_loss=True,
+           ):
+    if max_batch_n is not None:
+        batch = DCTPatches(
+                batch.patches[:max_batch_n],
+                batch.key_pad_mask[:max_batch_n],
+                batch.attn_mask[:max_batch_n],
+                batch.batched_image_ids[:max_batch_n],
+                batch.patch_positions[:max_batch_n],
+                batch.patch_sizes,
+                batch.original_sizes,
+        )
+
+    input_patches = batch.patches
+    
+    res = autoencoder(batch, return_loss)
+
+    output_patches = res['dct_patches']
+
+    if decode_pixels:
+        # inverse normalization for output_patches
+        output_patches.patches = autoencoder.patchnorm.inverse_norm(output_patches.patches, output_patches.h_indices, output_patches.w_indices)
+
+        images_hat = proc.postprocess(output_patches)
+        output_patches.patches = input_patches
+        images = proc.postprocess(output_patches)
+
+        pixel_loss = 0.0
+
+        for im, im_hat in zip(images, images_hat):
+            pixel_loss += F.mse_loss(im, im_hat)
+
+        pixel_loss = pixel_loss / len(images_hat)
+
+        d = dict(
+            x_hat=images_hat,
+            pixel_loss=pixel_loss,
+            x=images,
+        )
+        res.update(d)
+
+    return res
+
+
+def train_patch_norm(patch_norm: PatchNorm,
+               proc: DCTAutoencoderFeatureExtractor,
+               train_ds,
+               dtype,
+               device,
+               batch_size: int = 32,
+               steps: int = 20,
+               num_workers: int = 0,
+                 rng=None,
+               ):
+    train_ds = train_ds.shuffle(10000, rng=rng)
+    dataloader = DataLoader(
+                train_ds, batch_size=batch_size, num_workers=num_workers, collate_fn=get_collate_fn(proc)
+            )
+
+    patch_norm = patch_norm.to(torch.float32).to(device)
+
+    for i, batch in enumerate(tqdm(dataloader)):
+        if i+1 > steps:
+            break
+        batch = batch.to(device)
+        batch.patches = batch.patches.to(torch.float32)
+        normalized_patches = patch_norm.forward(
+            batch.patches, batch.h_indices, batch.w_indices, batch.key_pad_mask
+        )
+        mean = normalized_patches[~batch.key_pad_mask].mean() .item()
+        std = normalized_patches[~batch.key_pad_mask].std()   .item()
+        _min = normalized_patches[~batch.key_pad_mask].min()  .item()
+        _max = normalized_patches[~batch.key_pad_mask].max()  .item()
+        print(f"{i+1:03} mean {mean:.2f} std {std:.2f} min {_min:.2f} max {_max:.2f}")
+
+    patch_norm.frozen = True
+    patch_norm = patch_norm.to(dtype)
+    return patch_norm
+
+
+
 def train(
     autoencoder: DCTAutoencoder,
+    proc: DCTAutoencoderFeatureExtractor,
     train_ds,
     batch_size: int = 32,
     learning_rate=3e-3,
@@ -94,52 +177,30 @@ def train(
     max_steps=1e20,
     num_workers:int=0,
     warmup_steps=20,
-    train_norm_iters: int = 15,  # number of iterations to train the norm layer
     use_wandb: bool = False,
     vq_callables: List[Callable[[int], dict]] = [],
+    rng=None,
 ):
     optimizer = torch.optim.Adam(autoencoder.parameters(), lr=1e-9)
 
     n_steps = 0
 
-    collate_fn = get_collate_fn(autoencoder.dct_processor, )
+    collate_fn = get_collate_fn(proc)
 
-    # trains norm layer
-    train_ds = train_ds.shuffle(1000)
-
-    def get_dataloader():
-        return DataLoader(
+    # ----------- Model Training --------------
+    for epoch_i, epoch in enumerate(range(epochs)):
+        train_ds = train_ds.shuffle(10000, rng=rng)
+        dataloader = DataLoader(
             train_ds, batch_size=batch_size, num_workers=num_workers, collate_fn=collate_fn
         )
 
-    dataloader = get_dataloader()
-
-    print("training norms")
-    autoencoder.dct_processor.patch_norm.dtype = torch.float32
-    for i, batch in enumerate(tqdm(dataloader)):
-        if i+1 > train_norm_iters:
-            break
-        batch = batch.to(device)
-        normalized_patches = autoencoder.dct_processor.patch_norm.forward(
-            batch.patches, batch.h_indices, batch.w_indices, batch.key_pad_mask
-        )
-        mean = normalized_patches[~batch.key_pad_mask].mean() .item()
-        std = normalized_patches[~batch.key_pad_mask].std()   .item()
-        _min = normalized_patches[~batch.key_pad_mask].min()  .item()
-        _max = normalized_patches[~batch.key_pad_mask].max()  .item()
-        print(f"{i+1:03} mean {mean:.2f} std {std:.2f} min {_min:.2f} max {_max:.2f}")
-
-    autoencoder.dct_processor.patch_norm.frozen = True
-    autoencoder.dct_processor.patch_norm = autoencoder.dct_processor.patch_norm.to(dtype)
-    print("done training norm")
-
-    for epoch_i, epoch in enumerate(range(epochs)):
-        train_ds = train_ds.shuffle(5000)
-        dataloader = get_dataloader()
         for i, batch in enumerate(tqdm(dataloader)):
+
+            # ----- LR Warmup -----
             if epoch_i == 0 and i < warmup_steps:
                 for g in optimizer.param_groups:
                     g["lr"] = ((i + 1) / warmup_steps) * learning_rate
+
 
             batch = batch.to(device)
             batch.patches = batch.patches.to(dtype)
@@ -147,29 +208,11 @@ def train(
             seq_len = batch.patches.shape[1]
             batch_len = batch.patches.shape[0]
 
-            # normalizes 
-            with torch.no_grad():
-                batch.patches = autoencoder.dct_processor.patch_norm.forward(batch.patches, batch.h_indices, batch.w_indices, batch.key_pad_mask)
-
             if i % log_every == 0:
                 print("logging images ....")
                 autoencoder.eval()
-                log_batch = DCTPatches(
-                        batch.patches[:n_log],
-                        batch.key_pad_mask[:n_log],
-                        batch.h_indices[:n_log],
-                        batch.w_indices[:n_log],
-                        batch.attn_mask[:n_log],
-                        batch.batched_image_ids[:n_log],
-                        batch.patch_positions[:n_log],
-                        batch.patch_sizes,
-                        batch.original_sizes,
-                )
                 with torch.no_grad():
-                    out = autoencoder(
-                        log_batch,
-                        decode=True,
-                    )
+                    out = train_step(batch, autoencoder, proc, max_batch_n=n_log, decode_pixels=True, return_loss=False)
                 autoencoder.train()
                 image = make_image_grid(
                     out["x"], out["x_hat"], filename=f"{OUTDIR}/train image {i:04}.png"
@@ -177,8 +220,8 @@ def train(
                 log_d = dict(
                     epoch=epoch,
                     image=wandb.Image(image),
-                    **{k:v.item() for k, v in out.items() if "loss" in k}
-                    )
+                    **{k:v for k, v in out.items() if "loss" in k}
+                )
                 print("log:", log_d)
 
                 if use_wandb:
@@ -187,10 +230,8 @@ def train(
 
             optimizer.zero_grad()
 
-            out = autoencoder(
-                batch,
-                decode=False,
-            )
+
+            out = train_step(batch, autoencoder, proc)
 
             loss = 0.0
             for k,v in out.items():
@@ -198,7 +239,9 @@ def train(
                     loss += v
 
             loss.backward()
+
             torch.nn.utils.clip_grad_norm_(autoencoder.parameters(), 5.0)
+
             optimizer.step()
 
             log_dict = dict(
@@ -206,7 +249,7 @@ def train(
                             perplexity=out["perplexity"].item(),
                             batch_len=batch_len,
                             seq_len=seq_len,
-                            **{k:v.item() for k, v in out.items() if "loss" in k}
+                            **{k:v for k, v in out.items() if "loss" in k}
             )
 
             for fn in vq_callables:
@@ -235,7 +278,7 @@ def train(
 
 def load_and_transform_dataset(
     dataset_name_or_url: str,
-    dct_processor: DCTProcessor,
+    dct_processor: DCTAutoencoderFeatureExtractor,
     device='cpu',
 ):
     min_res = dct_processor.patch_size
@@ -260,41 +303,49 @@ def load_and_transform_dataset(
         .rename(pixel_values="jpg", handler=wds.handlers.warn_and_continue)
         .map(preproc, handler=wds.handlers.warn_and_continue)
         .rename_keys(patches="patches", positions="positions", original_sizes="original_sizes", patch_sizes="patch_sizes",)
-    )  # drops old columns
+    )
 
     return ds
 
 
+def get_model(model_config: DCTAutoencoderConfig,
+              device,
+              dtype,
+              sample_patches_beta = 3.0,
+              ):
+
+    max_seq_len = power_of_two(model_config.max_n_patches)
+
+    proc = DCTAutoencoderFeatureExtractor(
+        channels=model_config.image_channels,
+        patch_size=model_config.patch_size,
+        sample_patches=lambda : max(min(exp_dist(sample_patches_beta), 1.0), 0.01),
+        max_n_patches=model_config.max_n_patches,
+        max_seq_len=max_seq_len,
+    )
+
+    model = DCTAutoencoder(model_config).to(dtype).to(device)
+
+    return model, proc
+
+
 def main(
-    image_dataset_path_or_url="imagenet-1k",
+    image_dataset_path_or_url:str = None,
+    model_config_path = "./conf/patch4_small.json",
     device="cuda",
     dtype=torch.bfloat16,
     batch_size: int = 32,
-    max_batch_size:Optional[int] = None,
     num_workers:int=0,
     use_wandb: bool = False,
     train_norm_iters: int = 10,
     max_iters:int = 1000,
-    # makes the images more colorful
-    channel_diversity_loss_coeff:float=5e0,
 ):
 
+    model_config = DCTAutoencoderConfig.from_json_file(model_config_path)
+    autoencoder, processor = get_model(model_config, device, dtype)
 
-    image_channels: int = 3
-    if max_batch_size is None:
-        max_batch_size = batch_size
-    depth = 4
+    image_channels: int = model_config.image_channels
     warmup_steps = 50
-
-
-    codebook_dim=32
-    codebook_size = 4096
-    threshold_ema_dead_code=5
-    straight_through=True
-    sync_update_v=0.01
-    learnable_codebook=True
-
-    use_cosine_sim=False
 
     commitment_loss_weight_start = 5e-4
     commitment_loss_weight_end = 1e-8
@@ -307,154 +358,66 @@ def main(
     lfq_entropy_loss_end = 1e-1
     lfq_decay_fn = get_decay_fn(lfq_entropy_loss_start, lfq_entropy_loss_end, lfq_entropy_loss_n)
 
-    sample_codebook_temp= 1.0
+    vq_callables = [lambda i: {"entropy_loss_weight":lfq_decay_fn(i),"commitment_loss_weight":commitment_loss_weight_fn(i)} ]
 
+    learning_rate = 1e-4
 
-    def get_model(codebook_size, heads, patch_size, vq_type, ):
-        if vq_type=="lfq":
-            vq_model = vector_quantize_pytorch.LFQ(
-                    dim=feature_channels,
-                    codebook_size=codebook_size,
-                    num_codebooks=heads,
-                    entropy_loss_weight=lfq_entropy_loss_start,
-                    commitment_loss_weight=commitment_loss_weight_start,
-                )
-            vq_callables = [lambda i: {"entropy_loss_weight":lfq_decay_fn(i),"commitment_loss_weight":commitment_loss_weight_fn(i)} ]
-        elif vq_type == "vq":
-            vq_model = vector_quantize_pytorch.VectorQuantize(
-                feature_channels,
-                codebook_size=codebook_size,
-                codebook_dim=codebook_dim,
-                threshold_ema_dead_code=threshold_ema_dead_code,
-                heads=heads,
-                channel_last=True,
-                accept_image_fmap=False,
-                use_cosine_sim=use_cosine_sim,
-                kmeans_init=True,
-                kmeans_iters=20,
-                separate_codebook_per_head=False,
+    train_ds = load_and_transform_dataset(
+        image_dataset_path_or_url,
+        processor,
+        device=device if num_workers == 0 else 'cpu',
+    )
 
-                learnable_codebook=learnable_codebook,
-                ema_update=not learnable_codebook,
-                affine_param=learnable_codebook,
-                straight_through=straight_through,
-                affine_param_batch_decay = 0.99,
-                affine_param_codebook_decay = 0.9,
-                sync_update_v=sync_update_v,
+    bits = model_config.vq_num_codebooks * math.log2(model_config.vq_codebook_size) * processor.max_seq_len
 
-                sample_codebook_temp=sample_codebook_temp,
-                commitment_weight=commitment_loss_weight_start,
-            )
-            vq_callables = [lambda i: {"entropy_loss_weight":lfq_decay_fn(i),"commitment_weight":commitment_loss_weight_fn(i)} ]
-        elif vq_type == "dummy":
-            vq_model = DummyVQ()
-            vq_callables = []
+    run_d = dict(
+        compression_over_patches=processor.max_seq_len * image_channels * model_config.patch_size * model_config.patch_size / bits,
+        compression_over_image=512 ** 2 * image_channels/bits,
+        learning_rate=learning_rate,
+        commitment_loss_weight_start=commitment_loss_weight_start,
+        commitment_loss_weight_end=commitment_loss_weight_end,
+        commitment_loss_weight_n=commitment_loss_weight_n,
+        warmup_steps=warmup_steps,
+        lfq_entropy_loss_start=lfq_entropy_loss_start,
+        lfq_entropy_loss_end=lfq_entropy_loss_end,
+        lfq_entropy_loss_n=lfq_entropy_loss_n,
+    )
 
+    print("starting run: ", run_d)
+    if use_wandb:
+        wandb.init(project="vq-experiments", config=run_d)
 
-        proc = DCTProcessor(
-            channels=image_channels,
-            patch_size=patch_size,
-            sample_patches=lambda : max(min(exp_dist(3.0), 1.0), 0.01),
-            max_n_patches=max_n_patches,
-            max_seq_len=max_seq_len,
-            max_batch_size=max_batch_size,
-            patch_norm_device=device,
-        )
+    rng = random.Random(42)
 
-        model = (
-            DCTAutoencoder(
-                vq_model,
-                feature_channels=feature_channels,
-                depth=depth,
-                patch_size=patch_size,
-                max_n_patches=max_n_patches,
-                dct_processor=proc,
-                codebook_size=codebook_size,
-                channel_diversity_loss_coeff=channel_diversity_loss_coeff,
-            )
-            .to(dtype)
-            .to(device)
-        )
+    # ----------- Norm Training ---------------
+    print("training norm")
+    autoencoder.patchnorm = train_patch_norm(autoencoder.patchnorm,
+                                       processor,
+                                       train_ds, dtype, device, batch_size=min(batch_size, 32), steps=train_norm_iters, num_workers=num_workers, rng=rng)
+    print("done training norm")
 
-        return model, proc, vq_callables
+    # This trains using shorter sequence lengths
+    autoencoder = train(
+        autoencoder,
+        processor,
+        train_ds,
+        device=device,
+        dtype=dtype,
+        batch_size=batch_size,
+        use_wandb=use_wandb,
+        warmup_steps=warmup_steps,
+        num_workers=num_workers,
+        max_steps=max_iters,
+        vq_callables=vq_callables,
+        rng=rng,
+    )
 
-    max_total_codes = 4096
-    patch_size = 4
-    vq_type = "lfq"
+    # this trains using longer sequence lengths and a smaller batch size
 
-    heads = 8
-    max_n_patches = max_total_codes // heads
-    max_seq_len = power_of_two(max_n_patches)
-    _input_features = image_channels * patch_size ** 2
-    feature_channels: int = max(64, power_of_two(_input_features))
-    feature_channels = min(feature_channels, 2048)
+    autoencoder.save_pretrained(OUTDIR + "/model/")
 
-    for learning_rate in [1e-4,]:
-        autoencoder, processor, vq_callables = get_model(codebook_size, heads, patch_size, vq_type,)
-
-        ds_train = load_and_transform_dataset(
-            image_dataset_path_or_url,
-            processor,
-            device=device if num_workers == 0 else 'cpu',
-        )
-
-        bits = heads * math.log2(codebook_size) * max_seq_len
-
-        run_d = dict(
-            codebook_size=codebook_size,
-            heads=heads,
-            image_channels=image_channels,
-            max_n_patches=max_n_patches,
-            max_seq_len=max_seq_len,
-            depth=depth,
-            bits= bits,
-            use_cosine_sim=use_cosine_sim,
-            compression_over_patches=max_seq_len * image_channels * patch_size * patch_size / bits,
-            compression_over_image=512 ** 2 * image_channels/bits,
-            feature_dim=feature_channels,
-            patch_size=patch_size,
-            learning_rate=learning_rate,
-            codebook_dim=codebook_dim,
-            sample_codebook_temp =sample_codebook_temp,
-            commitment_loss_weight_start=commitment_loss_weight_start,
-            commitment_loss_weight_end=commitment_loss_weight_end,
-            commitment_loss_weight_n=commitment_loss_weight_n,
-            threshold_ema_dead_code=threshold_ema_dead_code,
-            warmup_steps=warmup_steps,
-            straight_through=straight_through,
-            sync_update_v=sync_update_v,
-            learnable_codebook=learnable_codebook,
-            vq_type=vq_type,
-            lfq_entropy_loss_start=lfq_entropy_loss_start,
-            lfq_entropy_loss_end=lfq_entropy_loss_end,
-            lfq_entropy_loss_n=lfq_entropy_loss_n,
-        )
-
-        print("starting run: ", run_d)
-
-        if use_wandb:
-            wandb.init(project="vq-experiments", config=run_d)
-
-        autoencoder = train(
-            autoencoder,
-            ds_train,
-            device=device,
-            dtype=dtype,
-            batch_size=batch_size,
-            use_wandb=use_wandb,
-            train_norm_iters=train_norm_iters,
-            warmup_steps=warmup_steps,
-            num_workers=num_workers,
-            max_steps=max_iters,
-            vq_callables=vq_callables,
-        )
-
-        torch.save(autoencoder, OUTDIR + "/autoencoder.pt")
-
-        autoencoder = None
-
-        if use_wandb:
-            wandb.finish()
+    if use_wandb:
+        wandb.finish()
 
 
 if __name__ == "__main__":
