@@ -1,4 +1,4 @@
-from typing import Callable, List, Optional
+from typing import Callable, List
 from tqdm import tqdm
 import torch
 import webdataset as wds
@@ -15,8 +15,8 @@ import random
 
 from dct_autoencoder.feature_extraction_dct_autoencoder import DCTAutoencoderFeatureExtractor
 from dct_autoencoder.patchnorm import PatchNorm
-from dct_autoencoder.util import exp_dist, power_of_two
-from dct_autoencoder.dct_patches import DCTPatches, concat_dctpatches, slice_dctpatches
+from dct_autoencoder.util import power_of_two
+from dct_autoencoder.dct_patches import DCTPatches, slice_dctpatches
 from dct_autoencoder.modeling_dct_autoencoder import DCTAutoencoder
 from dct_autoencoder.configuration_dct_autoencoder import DCTAutoencoderConfig
 
@@ -194,7 +194,7 @@ def train(
             train_ds, batch_size=batch_size, num_workers=num_workers, collate_fn=collate_fn
         )
         # list of columns, or None
-        for i, batch in enumerate(proc.iter_batches(iter(dataloader), batch_size)):
+        for i, batch in enumerate(tqdm(proc.iter_batches(iter(dataloader), batch_size))):
 
             # ----- LR Warmup -----
             if epoch_i == 0 and i < warmup_steps:
@@ -242,6 +242,7 @@ def train(
             log_dict = dict(
                             epoch=epoch,
                             step=i,
+                            n_images_in_batch = len(batch.original_sizes),
                             perplexity=out["perplexity"].item(),
                             batch_len=batch_len,
                             seq_len=seq_len,
@@ -306,9 +307,8 @@ def get_model(model_config: DCTAutoencoderConfig,
               device,
               dtype,
               sample_patches_beta,
+              max_seq_len,
               ):
-
-    max_seq_len = power_of_two(model_config.max_n_patches)
 
     proc = DCTAutoencoderFeatureExtractor(
         channels=model_config.image_channels,
@@ -337,10 +337,14 @@ def main(
     batch_size_ft: int = 16,
     max_iters_ft:int = 100,
     sample_patches_beta_ft:float = 0.75,
+    max_seq_len: int=512,
+    max_seq_len_ft:int = 768,
 ):
 
     model_config = DCTAutoencoderConfig.from_json_file(model_config_path)
-    autoencoder, processor = get_model(model_config, device, dtype, sample_patches_beta)
+    assert max_seq_len_ft <= model_config.max_n_patches
+
+    autoencoder, processor = get_model(model_config, device, dtype, sample_patches_beta, max_seq_len)
 
     image_channels: int = model_config.image_channels
     warmup_steps = 50
@@ -412,8 +416,9 @@ def main(
     )
 
     # this trains using longer sequence lengths and a smaller batch size
-    print("ft model")
+    print("------ft model--------")
     processor.sample_patches_beta = sample_patches_beta_ft
+    processor.max_seq_len = max_seq_len_ft
     processor, _ = train(
         autoencoder,
         processor,

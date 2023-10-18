@@ -2,7 +2,7 @@
   "channel_diversity_loss_coeff": 10.0,
   "feature_dim": 64,
   "image_channels": 3,
-  "max_n_patches": 512,
+  "max_n_patches": 768,
   "n_attention_heads": 16,
   "n_layers": 4,
   "patch_size": 4,

@@ -89,7 +89,7 @@ def zigzag(h: int, w: int):
         Zigzag ordering of JPEG image components
         https://en.wikipedia.org/wiki/JPEG#JPEG_codec_example
     """
-    out = torch.empty((w, h), dtype=torch.long)
+    out = torch.empty((h,w), dtype=torch.long)
 
     row, col = 0, 0
 

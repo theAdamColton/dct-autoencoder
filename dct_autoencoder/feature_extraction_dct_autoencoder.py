@@ -308,6 +308,7 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
 
         k = len(indices_flat)
         k = min(k, self.max_n_patches)
+        k = min(k, self.max_seq_len)
         # takes the top p closest distances (that are under self.max_n_patches)
         p = max(min(exp_dist(self.sample_patches_beta), 1.0), 0.01)
         k = round(k * p)
