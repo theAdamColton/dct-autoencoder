@@ -94,9 +94,6 @@ class GroupPatchesState:
     seq_len: int
 
 class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
-    feature_extractor_class = "DCTAutoencoderProcessor"
-    tokenizer_class = None
-
     def __init__(
         self,
         channels: int,
@@ -173,7 +170,7 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         return patched_ims, positions, original_sizes, patch_sizes
 
     @torch.no_grad()
-    def iter_batches(self, dataloader, batch_size: int = 32):
+    def iter_batches(self, dataloader, batch_size: Optional[int] = None):
         """
         dataloader: iterable, returns [patches, positions, original_sizes, patch_sizes]
         """
@@ -185,14 +182,27 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
             # TODO catch iter
             patches, positions, original_sizes, patch_sizes = next(dataloader)
 
+            # keeps on cpu, as to not waste gpu space
+            patches = [p.to('cpu') for p in patches]
+            positions = [p.to('cpu') for p in positions]
+
             cum_original_sizes = cum_original_sizes + original_sizes
             cum_patch_sizes = cum_patch_sizes + patch_sizes
 
             state = self._group_patches_by_max_seq_len(patches, positions, state)
+
+            if batch_size is None:
+                # immediately output a batch for this state
+                if len(state.group) > 0:
+                    state.groups.append(state.group)
+                    state.groups_pos.append(state.group_pos)
+                    state.seq_len = 0
+                    state.group = []
+                    state.group_pos = []
+
             cur_batch_size = len(state.groups)
 
-
-            if cur_batch_size > batch_size:
+            if batch_size is None or cur_batch_size > batch_size:
                 # clips state
                 new_state = GroupPatchesState(
                         groups=state.groups[batch_size:],
@@ -218,11 +228,12 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
 
                 batch = self._batch_groups(state.groups, state.groups_pos, original_sizes = cum_original_sizes, patch_sizes = cum_patch_sizes)
 
-                assert batch.patches.shape[0] == batch_size
-                assert batch.key_pad_mask.shape[0] == batch_size
-                assert batch.batched_image_ids.shape[0] == batch_size
-                assert batch.patch_positions.shape[0] == batch_size
-                assert batch.attn_mask.shape[0] == batch_size
+                if batch_size is not None:
+                    assert batch.patches.shape[0] == batch_size
+                    assert batch.key_pad_mask.shape[0] == batch_size
+                    assert batch.batched_image_ids.shape[0] == batch_size
+                    assert batch.patch_positions.shape[0] == batch_size
+                    assert batch.attn_mask.shape[0] == batch_size
 
                 cum_patch_sizes = new_patch_sizes
                 cum_original_sizes = new_original_sizes
@@ -310,7 +321,10 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         k = min(k, self.max_n_patches)
         k = min(k, self.max_seq_len)
         # takes the top p closest distances (that are under self.max_n_patches)
-        p = max(min(exp_dist(self.sample_patches_beta), 1.0), 0.01)
+        if self.sample_patches_beta > 0.00:
+            p = max(min(exp_dist(self.sample_patches_beta), 1.0), 0.01)
+        else:
+            p=1.0
         k = round(k * p)
         k = max(1, k)
         k = min(self.max_n_patches, k)

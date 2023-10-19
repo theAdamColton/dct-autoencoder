@@ -118,14 +118,21 @@ class DCTAutoencoder(PreTrainedModel):
 
         return dct_patches, codes, vq_loss
 
+    def decode_from_codes(
+            self,
+            codes: torch.LongTensor,
+            **dct_patches_kwargs) -> DCTPatches:
+        x = self.vq_model.indices_to_codes(codes)
+        x = DCTPatches(patches = x, **dct_patches_kwargs)
+        z = self.decode(x)
+        x.patches = z
+        return x
+
+
     def decode(
             self,
             x: DCTPatches,
             ) -> torch.Tensor:
-        """
-        TODO
-        Can provide either dct_patches embeddings x, or vq codes
-        """
         return self.proj_out(self.decoder(x.patches, attn_mask=~x.attn_mask))
 
 

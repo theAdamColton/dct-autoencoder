@@ -12,6 +12,7 @@ import time
 import json
 import wandb
 import random
+from PIL import ImageDraw
 
 from dct_autoencoder.feature_extraction_dct_autoencoder import DCTAutoencoderFeatureExtractor
 from dct_autoencoder.patchnorm import PatchNorm
@@ -63,6 +64,8 @@ def make_image_grid(x, x_hat, filename=None, n: int = 10, max_size: int = 1024):
 
     n = min(len(x), n)
 
+
+
     for i in range(n):
         im = x[i]
         im_hat = x_hat[i]
@@ -77,8 +80,10 @@ def make_image_grid(x, x_hat, filename=None, n: int = 10, max_size: int = 1024):
 
     ims = [F.pad(im, (w - im.shape[2], 0, h - im.shape[1], 0)) for im in ims]
 
+
     im = torchvision.utils.make_grid(ims, 2, normalize=False, scale_each=False)
     im = transforms.functional.to_pil_image(im.cpu().to(torch.float32))
+
     if filename:
         im.save(filename)
         print("saved ", filename)
@@ -339,6 +344,10 @@ def main(
     sample_patches_beta_ft:float = 0.75,
     max_seq_len: int=512,
     max_seq_len_ft:int = 768,
+    commitment_loss_weight_start:float = 5e-4,
+    commitment_loss_weight_end:float = 1e-8,
+    lfq_entropy_loss_start:float = 5e1,
+    lfq_entropy_loss_end:float = 1e-1,
 ):
 
     model_config = DCTAutoencoderConfig.from_json_file(model_config_path)
@@ -346,23 +355,22 @@ def main(
 
     autoencoder, processor = get_model(model_config, device, dtype, sample_patches_beta, max_seq_len)
 
+    autoencoder.vq_model.entropy_loss_weight = lfq_entropy_loss_start
+    autoencoder.vq_model.commitment_loss_weight = commitment_loss_weight_start
+
     image_channels: int = model_config.image_channels
     warmup_steps = 50
 
-    commitment_loss_weight_start = 5e-4
-    commitment_loss_weight_end = 1e-8
     commitment_loss_weight_n = max_iters
     commitment_loss_weight_fn = get_decay_fn(commitment_loss_weight_start, commitment_loss_weight_end, commitment_loss_weight_n)
 
 
-    lfq_entropy_loss_start = 5e1
     lfq_entropy_loss_n = max_iters
-    lfq_entropy_loss_end = 1e-1
     lfq_decay_fn = get_decay_fn(lfq_entropy_loss_start, lfq_entropy_loss_end, lfq_entropy_loss_n)
 
     vq_callables = [lambda i: {"entropy_loss_weight":lfq_decay_fn(i),"commitment_loss_weight":commitment_loss_weight_fn(i)} ]
 
-    learning_rate = 3e-3
+    learning_rate = 1e-3
 
     train_ds = load_and_transform_dataset(
         image_dataset_path_or_url,
@@ -372,13 +380,18 @@ def main(
 
     bits = model_config.vq_num_codebooks * math.log2(model_config.vq_codebook_size) * processor.max_seq_len
 
+    n_params = 0
+    for p in autoencoder.parameters():
+        n_params += p.nelement()
+
     run_d = dict(
-        compression_over_patches=processor.max_seq_len * image_channels * model_config.patch_size * model_config.patch_size / bits,
-        compression_over_image=512 ** 2 * image_channels/bits,
+        compression_over_patches=(processor.max_seq_len * image_channels * model_config.patch_size**2 * 16)  / bits,
+        compression_over_image=(512 ** 2 * image_channels * 8)/bits,
         learning_rate=learning_rate,
         commitment_loss_weight_start=commitment_loss_weight_start,
         commitment_loss_weight_end=commitment_loss_weight_end,
         commitment_loss_weight_n=commitment_loss_weight_n,
+        n_params=n_params,
         warmup_steps=warmup_steps,
         lfq_entropy_loss_start=lfq_entropy_loss_start,
         lfq_entropy_loss_end=lfq_entropy_loss_end,
