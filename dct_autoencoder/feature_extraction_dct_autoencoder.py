@@ -107,7 +107,6 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         self.patch_size = patch_size
         self.sample_patches_beta = sample_patches_beta
         self.max_n_patches = max_n_patches
-        self.max_res = patch_size * max_n_patches
         self.max_seq_len = max_seq_len
 
         # what percent of tokens to dropout

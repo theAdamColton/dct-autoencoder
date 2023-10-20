@@ -361,7 +361,7 @@ def main(
     # .9 = 1-e^(-beta*x)
     # - ln(0.1) / beta = x
 
-    cdf_p = 0.975
+    cdf_p = 0.95
     max_seq_len = round(-1*math.log(1-cdf_p) / sample_patches_beta)
     max_seq_len = power_of_two(max_seq_len)
     max_seq_len_ft= round(-1*math.log(1-cdf_p) / sample_patches_beta_ft)
@@ -387,6 +387,7 @@ def main(
     vq_callables = [lambda i: {"entropy_loss_weight":lfq_decay_fn(i),"commitment_loss_weight":commitment_loss_weight_fn(i)} ]
 
     learning_rate = 1e-3
+    learning_rate_ft = 7e-4
 
     train_ds = load_and_transform_dataset(
         image_dataset_path_or_url,
@@ -428,9 +429,11 @@ def main(
     # ----------- Norm Training ---------------
     print("training norm")
     processor.sample_patches_beta = 0.0
+    processor.max_seq_len = model_config.max_n_patches
     autoencoder.patchnorm = train_patch_norm(autoencoder.patchnorm,
                                        processor,
                                        train_ds, dtype, device, batch_size=min(batch_size, 32), steps=train_norm_iters,rng=rng)
+    processor.max_seq_len = max_seq_len 
     processor.sample_patches_beta = sample_patches_beta
     print("done training norm")
 
@@ -462,7 +465,7 @@ def main(
         optimizer=optimizer,
         device=device,
         dtype=dtype,
-        learning_rate=learning_rate,
+        learning_rate=learning_rate_ft,
         batch_size=batch_size_ft,
         use_wandb=use_wandb,
         warmup_steps=warmup_steps,

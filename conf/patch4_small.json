@@ -2,11 +2,11 @@
   "channel_diversity_loss_coeff": 10.0,
   "feature_dim": 64,
   "image_channels": 3,
-  "max_n_patches": 768,
-  "n_attention_heads": 16,
-  "n_layers": 4,
+  "max_n_patches": 256,
+  "n_attention_heads": 4,
+  "n_layers": 8,
   "patch_size": 4,
   "transformers_version": "4.33.1",
   "vq_codebook_size": 4096,
-  "vq_num_codebooks": 8
+  "vq_num_codebooks": 4
 }
