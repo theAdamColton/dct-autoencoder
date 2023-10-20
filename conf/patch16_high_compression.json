@@ -1,0 +1,12 @@
+{
+  "channel_diversity_loss_coeff": 10.0,
+  "feature_dim": 1024,
+  "image_channels": 3,
+  "max_n_patches": 64,
+  "n_attention_heads": 8,
+  "n_layers": 2,
+  "patch_size": 16,
+  "transformers_version": "4.33.1",
+  "vq_codebook_size": 4096,
+  "vq_num_codebooks": 128
+}

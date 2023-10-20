@@ -179,7 +179,6 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         cum_original_sizes = []
         cum_patch_sizes = []
         while True:
-            # TODO catch iter
             patches, positions, original_sizes, patch_sizes = next(dataloader)
 
             # keeps on cpu, as to not waste gpu space

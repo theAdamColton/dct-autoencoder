@@ -12,7 +12,6 @@ import time
 import json
 import wandb
 import random
-from PIL import ImageDraw
 
 from dct_autoencoder.feature_extraction_dct_autoencoder import DCTAutoencoderFeatureExtractor
 from dct_autoencoder.patchnorm import PatchNorm
@@ -139,12 +138,11 @@ def train_patch_norm(patch_norm: PatchNorm,
                device,
                batch_size: int = 32,
                steps: int = 20,
-               num_workers: int = 0,
                  rng=None,
                ):
     train_ds = train_ds.shuffle(10000, rng=rng)
     dataloader = DataLoader(
-                train_ds, batch_size=batch_size, num_workers=num_workers, collate_fn=get_collate_fn(proc)
+                train_ds, batch_size=batch_size, num_workers=0, collate_fn=get_collate_fn(proc)
             )
 
     patch_norm = patch_norm.to(torch.float32).to(device)
@@ -341,17 +339,35 @@ def main(
     sample_patches_beta:float= 2.5,
     batch_size_ft: int = 16,
     max_iters_ft:int = 100,
-    sample_patches_beta_ft:float = 0.75,
-    max_seq_len: int=512,
-    max_seq_len_ft:int = 768,
+    sample_patches_beta_ft:float = 0.01,
     commitment_loss_weight_start:float = 5e-4,
     commitment_loss_weight_end:float = 1e-8,
     lfq_entropy_loss_start:float = 5e1,
     lfq_entropy_loss_end:float = 1e-1,
 ):
 
+
+
     model_config = DCTAutoencoderConfig.from_json_file(model_config_path)
-    assert max_seq_len_ft <= model_config.max_n_patches
+
+
+
+    # the max sequence lengths is based off of the exp dist
+    # CDF at some probability
+
+    # CDF: F(x;beta) = 1-e^(-beta*x)
+    # x is the sequence length
+    # we pick x s.t.
+    # .9 = 1-e^(-beta*x)
+    # - ln(0.1) / beta = x
+
+    cdf_p = 0.975
+    max_seq_len = round(-1*math.log(1-cdf_p) / sample_patches_beta)
+    max_seq_len = power_of_two(max_seq_len)
+    max_seq_len_ft= round(-1*math.log(1-cdf_p) / sample_patches_beta_ft)
+    max_seq_len_ft = power_of_two(max_seq_len_ft)
+    max_seq_len = min(model_config.max_n_patches, max_seq_len)
+    max_seq_len_ft = min(model_config.max_n_patches, max_seq_len_ft)
 
     autoencoder, processor = get_model(model_config, device, dtype, sample_patches_beta, max_seq_len)
 
@@ -378,14 +394,17 @@ def main(
         device=device if num_workers == 0 else 'cpu',
     )
 
-    bits = model_config.vq_num_codebooks * math.log2(model_config.vq_codebook_size) * processor.max_seq_len
+    bits = model_config.vq_num_codebooks * math.log2(model_config.vq_codebook_size) * processor.max_n_patches
 
     n_params = 0
-    for p in autoencoder.parameters():
-        n_params += p.nelement()
+    for n,p in autoencoder.named_parameters():
+        if 'patchnorm' not in n:
+            n_params += p.nelement()
 
     run_d = dict(
-        compression_over_patches=(processor.max_seq_len * image_channels * model_config.patch_size**2 * 16)  / bits,
+        max_seq_len=max_seq_len,
+        max_seq_len_ft = max_seq_len_ft,
+        compression_over_patches=(processor.max_n_patches * image_channels * model_config.patch_size**2 * 16)  / bits,
         compression_over_image=(512 ** 2 * image_channels * 8)/bits,
         learning_rate=learning_rate,
         commitment_loss_weight_start=commitment_loss_weight_start,
@@ -396,6 +415,8 @@ def main(
         lfq_entropy_loss_start=lfq_entropy_loss_start,
         lfq_entropy_loss_end=lfq_entropy_loss_end,
         lfq_entropy_loss_n=lfq_entropy_loss_n,
+        sample_patches_beta=sample_patches_beta,
+        sample_patches_beta_ft=sample_patches_beta_ft,
     )
 
     print("starting run: ", run_d)
@@ -406,9 +427,11 @@ def main(
 
     # ----------- Norm Training ---------------
     print("training norm")
+    processor.sample_patches_beta = 0.0
     autoencoder.patchnorm = train_patch_norm(autoencoder.patchnorm,
                                        processor,
-                                       train_ds, dtype, device, batch_size=min(batch_size, 32), steps=train_norm_iters, num_workers=num_workers, rng=rng)
+                                       train_ds, dtype, device, batch_size=min(batch_size, 32), steps=train_norm_iters,rng=rng)
+    processor.sample_patches_beta = sample_patches_beta
     print("done training norm")
 
     # This trains using shorter sequence lengths
@@ -436,6 +459,7 @@ def main(
         autoencoder,
         processor,
         train_ds,
+        optimizer=optimizer,
         device=device,
         dtype=dtype,
         learning_rate=learning_rate,

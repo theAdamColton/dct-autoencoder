@@ -10,20 +10,19 @@ from PIL import ImageDraw
 
 from torch_dct import dct_2d, idct_2d
 from dct_autoencoder.dct_patches import DCTPatches
-from dct_autoencoder.util import flatten_zigzag, unflatten_zigzag, zigzag
 from dct_autoencoder import DCTAutoencoder, DCTAutoencoderFeatureExtractor
 torch.set_grad_enabled(False)
 
 
-def main(model_path: str, device="cuda", dtype=torch.bfloat16):
-    image = torchvision.io.read_image("images/bold.jpg") / 255
+def main(model_path: str, device="cuda", dtype=torch.bfloat16, image_path:str="images/bold.jpg"):
+    image = torchvision.io.read_image(image_path) / 255
     c, h, w = image.shape
     ar = h / w
     if w < h:
-        w = min(256, w)
+        w = min(512, w)
         h = int(ar * w)
     else:
-        h = min(256, h)
+        h = min(512, h)
         w = int(h / ar)
     image = torchvision.transforms.Resize((h, w))(image)
     image_dct = dct_2d(image, "ortho")
@@ -92,19 +91,16 @@ def main(model_path: str, device="cuda", dtype=torch.bfloat16):
             img.sub_(low).div_(max(high - low, 1e-5))
             return img
 
-        def norm_range(t):
-            return norm_ip(t, float(t.min()), float(t.max()))
-        return norm_range(x)
-        q = 0.01
-        x = x + x.quantile(q, dim=0, keepdim=True)
-        x = x / x.quantile(1-q, dim=0, keepdim=True)
-        x = x.clamp(0,1)
-        return x
+        q = 0.025
+        _min = x.quantile(q)
+        _max = x.quantile(1-q)
+
+        return norm_ip(x, float(_min), float(_max))
 
     images = []
-    n = autoenc.config.max_n_patches
+    n = batch.patches.shape[1]
     jmp = 32
-    for i in tqdm(range(1, n, jmp)):
+    for i in tqdm(range(1, n+1, jmp)):
         masked_dct_patches = mask_and_rec(i)
 
         proc._transform_image_out = lambda x:x
@@ -119,8 +115,12 @@ def main(model_path: str, device="cuda", dtype=torch.bfloat16):
         masked_dct_patches.patches = batch.patches.clone()[:, distances_i[:i]]
         #masked_dct_patches = inv_norm(masked_dct_patches)
         image_original = proc.postprocess(masked_dct_patches)[0].cpu()
-
         image_original = _norm_image(image_original)
+
+#        image_masked = rgb2hsv_torch(image_masked.unsqueeze(0)).squeeze(0)
+#        image_masked[1] = image_masked[1] + 0.0
+#        image_masked = rgb2hsv_torch(image_masked.unsqueeze(0)).squeeze(0)
+
         image_masked = _norm_image(image_masked)
 
         im = torchvision.utils.make_grid(
@@ -133,7 +133,7 @@ def main(model_path: str, device="cuda", dtype=torch.bfloat16):
 
         images.append(im)
 
-    imageio.mimsave("dct_zigzag.gif", images, duration=15 / (n / jmp))
+    imageio.mimsave("dct_zigzag.gif", images, duration=3 * (n / jmp))
 
 
 if __name__ == "__main__":
