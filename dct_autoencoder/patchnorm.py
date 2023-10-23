@@ -54,11 +54,11 @@ class PatchNorm(nn.Module):
             requires_grad=False,
         )
         self.mean = nn.Parameter(
-            torch.zeros(max_n_patches_h, max_n_patches_w, patch_res ** 2),
+            torch.zeros(max_n_patches_h, max_n_patches_w, patch_res ** 2 * channels),
             requires_grad=False,
         )
         self.m2 = nn.Parameter(
-            torch.zeros(max_n_patches_h, max_n_patches_w, patch_res ** 2),
+            torch.zeros(max_n_patches_h, max_n_patches_w, patch_res ** 2 * channels),
             requires_grad=False,
         )
 
@@ -96,8 +96,6 @@ class PatchNorm(nn.Module):
         pos_h = pos_h[~key_pad_mask]
         pos_w = pos_w[~key_pad_mask]
          
-        # moves the channel dim up
-        patches = rearrange(patches, 'b s (c p1 p2) -> b s c (p1 p2)', c = self.channels, p1=self.patch_res, p2=self.patch_res)
         patches_shape = patches.shape
 
         patches = patches[~key_pad_mask]
@@ -109,32 +107,26 @@ class PatchNorm(nn.Module):
                 scatter_add_2d(self.n.unsqueeze(-1), pos_h, pos_w)
 
                 # updates the mean
-                delta = patches - self.mean[pos_h, pos_w].unsqueeze(1)
-                delta = delta.mean(dim=1)
+                delta = patches - self.mean[pos_h, pos_w]
 
                 scatter_add_2d(
                     self.mean, pos_h, pos_w, delta / self.n[pos_h, pos_w].unsqueeze(-1)
                 )
 
-                delta2 = patches - self.mean[pos_h, pos_w].unsqueeze(1)
-                delta2 = delta2.mean(dim=1)
+                delta2 = patches - self.mean[pos_h, pos_w]
 
                 scatter_add_2d(self.m2, pos_h, pos_w, delta * delta2)
 
-        patches = (patches - self.mean[pos_h, pos_w].unsqueeze(1)) / (
-            self.std[pos_h, pos_w].unsqueeze(1) + self.eps
+        patches = (patches - self.mean[pos_h, pos_w]) / (
+            self.std[pos_h, pos_w] + self.eps
         )
 
         out = torch.zeros(patches_shape, dtype=patches.dtype, device=patches.device)
         out[~key_pad_mask] = patches
 
-        # puts the channel dim back
-        out = rearrange(out, 'b s c (p1 p2) -> b s (c p1 p2)', c=self.channels, p1=self.patch_res, p2=self.patch_res)
         return out
 
     def inverse_norm(
         self, patches: torch.Tensor, pos_h: torch.LongTensor, pos_w: torch.LongTensor
     ):
-        patches = rearrange(patches, 'b s (c p1 p2) -> b s c (p1 p2)', c=self.channels, p1=self.patch_res, p2=self.patch_res)
-        patches =  patches * (self.std[pos_h, pos_w].unsqueeze(-2) + self.eps) + self.mean[pos_h, pos_w].unsqueeze(-2)
-        return rearrange(patches, 'b s c (p1 p2) -> b s (c p1 p2)', c=self.channels, p1=self.patch_res, p2=self.patch_res)
+        return  patches * (self.std[pos_h, pos_w] + self.eps) + self.mean[pos_h, pos_w]

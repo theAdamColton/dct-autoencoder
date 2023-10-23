@@ -1,4 +1,4 @@
-from einops import rearrange
+from einops import rearrange, reduce
 import torch.nn.functional as F
 import torch
 import torch.nn as nn
@@ -11,6 +11,7 @@ from dct_autoencoder.patchnorm import PatchNorm
 from .configuration_dct_autoencoder import DCTAutoencoderConfig
 from .util import (
     calculate_perplexity,
+    lightness,
 )
 from .dct_patches import DCTPatches
 
@@ -161,38 +162,26 @@ class DCTAutoencoder(PreTrainedModel):
         dct_patches.patches = self.decode(dct_patches)
 
         if return_loss:
-            rec_loss = F.mse_loss(dct_patches.patches[mask], input_patches[mask])
-        else:
-            rec_loss = 0.0
-
-        if return_loss and self.config.channel_diversity_loss_coeff > 0.0:
             def pull_out_channels(x):
                 c, p1, p2 = self.config.image_channels, self.config.patch_size, self.config.patch_size
                 return rearrange(x, '... (c p1 p2) -> ... c (p1 p2)', c=c,p1=p1,p2=p2)
 
-            # normalize the reconstructed dct patches by subtracting the mean
-            # In essence, this removes the grayscale information from the image.
-            # For channel_diversity_loss, we don't care about getting the right grayscale 
-            # cross-channel intensities.
-            # We instead care about getting the right variation across
-            # channels, per pixel.
+            # returns loss, but not reducing over input image channels
             patch_hats = pull_out_channels(dct_patches.patches)[mask]
             patch = pull_out_channels(input_patches)[mask]
-
-            channel_diversity_loss = F.mse_loss(
-                    patch - patch.mean(dim=-2, keepdim=True),
-                    patch_hats - patch_hats.mean(dim=-2, keepdim=True),
-            ) * self.config.channel_diversity_loss_coeff
+            rec_loss = reduce((patch_hats - patch) ** 2, '... c (p1 p2) -> c', 'mean', p1=self.config.patch_size, p2=self.config.patch_size)
+            y_loss, cb_loss, cr_loss = rec_loss
         else:
-            channel_diversity_loss = 0.0
+            y_loss, cb_loss, cr_loss = 0.0, 0.0, 0.0
 
         return dict(
             dct_patches=dct_patches,
             perplexity=perplexity,
             commit_loss=vq_loss,
-            rec_loss=rec_loss,
             codes=codes,
-            channel_diversity_loss=channel_diversity_loss,
+            y_loss=y_loss,
+            cb_loss=cb_loss,
+            cr_loss=cr_loss,
         )
     
 

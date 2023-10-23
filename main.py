@@ -15,7 +15,7 @@ import random
 
 from dct_autoencoder.feature_extraction_dct_autoencoder import DCTAutoencoderFeatureExtractor
 from dct_autoencoder.patchnorm import PatchNorm
-from dct_autoencoder.util import power_of_two
+from dct_autoencoder.util import power_of_two, rgb_to_ycbcr
 from dct_autoencoder.dct_patches import DCTPatches, slice_dctpatches
 from dct_autoencoder.modeling_dct_autoencoder import DCTAutoencoder
 from dct_autoencoder.configuration_dct_autoencoder import DCTAutoencoderConfig
@@ -62,8 +62,6 @@ def make_image_grid(x, x_hat, filename=None, n: int = 10, max_size: int = 1024):
     ims = []
 
     n = min(len(x), n)
-
-
 
     for i in range(n):
         im = x[i]
@@ -180,10 +178,11 @@ def train(
     n_log: int = 10,
     max_steps:int=1000000,
     num_workers:int=0,
-    warmup_steps=20,
+    warmup_steps=10,
     use_wandb: bool = False,
     vq_callables: List[Callable[[int], dict]] = [],
     rng=None,
+    loss_weight={},
 ):
     if optimizer is None:
         optimizer = torch.optim.Adam(autoencoder.parameters(), lr=1e-9)
@@ -233,7 +232,11 @@ def train(
             loss = 0.0
             for k,v in out.items():
                 if "loss" in k:
-                    loss += v
+                    if k in loss_weight:
+                        weight = loss_weight[k]
+                    else:
+                        weight = 1.0
+                    loss += v * weight
 
             loss.backward()
 
@@ -249,6 +252,7 @@ def train(
                             perplexity=out["perplexity"].item(),
                             batch_len=batch_len,
                             seq_len=seq_len,
+                            loss = loss,
                             **get_loss_dict(out),
             )
             if image:
@@ -294,7 +298,7 @@ def load_and_transform_dataset(
         return x
 
     ds = (
-        wds.WebDataset(dataset_name_or_url)
+        wds.WebDataset(dataset_name_or_url, handler=wds.handlers.warn_and_continue)
         .map_dict(json=json.loads, handler=wds.handlers.warn_and_continue)
         .select(filter_res,)
         .decode("torchrgb", partial=True, handler=wds.handlers.warn_and_continue)
@@ -344,10 +348,10 @@ def main(
     commitment_loss_weight_end:float = 1e-8,
     lfq_entropy_loss_start:float = 5e1,
     lfq_entropy_loss_end:float = 1e-1,
+    learning_rate:float = 1e-3,
+    learning_rate_ft:float = 8e-4,
+    loss_weight: dict[str,float] = {"y_loss": 4.0},
 ):
-
-
-
     model_config = DCTAutoencoderConfig.from_json_file(model_config_path)
 
 
@@ -364,10 +368,10 @@ def main(
     cdf_p = 0.95
     max_seq_len = round(-1*math.log(1-cdf_p) / sample_patches_beta)
     max_seq_len = power_of_two(max_seq_len)
-    max_seq_len_ft= round(-1*math.log(1-cdf_p) / sample_patches_beta_ft)
-    max_seq_len_ft = power_of_two(max_seq_len_ft)
     max_seq_len = min(model_config.max_n_patches, max_seq_len)
-    max_seq_len_ft = min(model_config.max_n_patches, max_seq_len_ft)
+
+    max_seq_len_ft= model_config.max_n_patches#round(-1*math.log(1-cdf_p) / sample_patches_beta_ft)
+    #max_seq_len_ft = power_of_two(max_seq_len_ft)
 
     autoencoder, processor = get_model(model_config, device, dtype, sample_patches_beta, max_seq_len)
 
@@ -386,8 +390,6 @@ def main(
 
     vq_callables = [lambda i: {"entropy_loss_weight":lfq_decay_fn(i),"commitment_loss_weight":commitment_loss_weight_fn(i)} ]
 
-    learning_rate = 1e-3
-    learning_rate_ft = 7e-4
 
     train_ds = load_and_transform_dataset(
         image_dataset_path_or_url,
@@ -403,6 +405,8 @@ def main(
             n_params += p.nelement()
 
     run_d = dict(
+        sample_patches_beta_ft=sample_patches_beta_ft,
+        sample_patches_beta=sample_patches_beta,
         max_seq_len=max_seq_len,
         max_seq_len_ft = max_seq_len_ft,
         compression_over_patches=(processor.max_n_patches * image_channels * model_config.patch_size**2 * 16)  / bits,
@@ -416,8 +420,9 @@ def main(
         lfq_entropy_loss_start=lfq_entropy_loss_start,
         lfq_entropy_loss_end=lfq_entropy_loss_end,
         lfq_entropy_loss_n=lfq_entropy_loss_n,
-        sample_patches_beta=sample_patches_beta,
-        sample_patches_beta_ft=sample_patches_beta_ft,
+        feature_dim=model_config.feature_dim,
+        n_attention_heads = model_config.n_attention_heads,
+        patch_size=model_config.patch_size,
     )
 
     print("starting run: ", run_d)
@@ -452,6 +457,7 @@ def main(
         max_steps=max_iters,
         vq_callables=vq_callables,
         rng=rng,
+        loss_weight=loss_weight,
     )
 
     # this trains using longer sequence lengths and a smaller batch size
@@ -471,8 +477,9 @@ def main(
         warmup_steps=warmup_steps,
         num_workers=num_workers,
         max_steps=max_iters_ft,
-        #vq_callables=vq_callables,
+        vq_callables=vq_callables,
         rng=rng,
+        loss_weight=loss_weight,
     )
 
     autoencoder.save_pretrained(OUTDIR + "/model/")

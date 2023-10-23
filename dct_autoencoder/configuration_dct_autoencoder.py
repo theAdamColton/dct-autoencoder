@@ -9,7 +9,6 @@ class DCTAutoencoderConfig(PretrainedConfig):
             feature_dim:int = 64,
             patch_size: int = 4,
             max_n_patches: int = 768,
-            channel_diversity_loss_coeff: float = 1e0,
 
             # VQ params
             vq_codebook_size:int = 4096,
@@ -22,7 +21,6 @@ class DCTAutoencoderConfig(PretrainedConfig):
         self.feature_dim = feature_dim
         self.patch_size = patch_size
         self.max_n_patches = max_n_patches
-        self.channel_diversity_loss_coeff = channel_diversity_loss_coeff
 
         self.vq_codebook_size = vq_codebook_size
         self.vq_num_codebooks = vq_num_codebooks

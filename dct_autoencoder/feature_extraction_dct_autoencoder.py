@@ -82,6 +82,8 @@ from .util import (
     exp_dist,
     idct2,
     pad_sequence,
+    rgb_to_ycbcr,
+    ycbcr_to_rgb,
 )
 
 
@@ -125,8 +127,10 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
     @torch.no_grad()
     def _transform_image_in(self, x):
         """
-        x is a image tensor, with values between 0.0 and 1.0
+        x is a image tensor containing rgb colors, with values between 0.0
+        and 1.0
         """
+        x = rgb_to_ycbcr(x)
         og_dtype = x.dtype
         return dct2(x.to(torch.float32), 'ortho').to(og_dtype)
 
@@ -134,6 +138,7 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
     def _transform_image_out(self, x):
         og_dtype = x.dtype
         image = idct2(x.to(torch.float32), 'ortho').to(og_dtype)
+        image = ycbcr_to_rgb(image)
         # TODO clamp
         image = image.clamp(0.0, 1.0)
         return image
@@ -243,7 +248,9 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
     @torch.no_grad()
     def postprocess(self, x: DCTPatches) -> List[torch.Tensor]:
         """
-        return a list of images
+        x: DCTPatches that are not normalized
+
+        return a list of image rgb values
         """
         dct_images = self.revert_patching(x)
         images = []

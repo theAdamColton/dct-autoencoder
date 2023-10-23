@@ -7,6 +7,54 @@ from torch_dct import dct_2d, idct_2d
 import random
 import math
 
+def rgb_to_ycbcr(x:torch.Tensor):
+    """
+    x: (..., c, h, w)
+
+    https://en.wikipedia.org/wiki/YCbCr#JPEG_conversion
+    """
+
+    r = x[..., 0, :, :]
+    g = x[..., 1, :, :]
+    b = x[..., 2, :, :]
+
+    y = 0.299 * r + 0.587 * g + 0.114 * b
+
+    cb = (-0.299 * r - 0.587 * g + 0.866* b ) / 1.772 + 0.5
+    cr = (0.701 * r - 0.587 * g - 0.144 * b ) / 1.402 + 0.5
+
+    return torch.stack([y, cb, cr], dim=-3)
+
+def ycbcr_to_rgb(x: torch.Tensor):
+    """
+    x: (..., c, h, w)
+
+    https://en.wikipedia.org/wiki/YCbCr#JPEG_conversion
+    """
+    y = x[..., 0, :, :]
+    cb = x[..., 1, :, :]
+    cr = x[..., 2, :, :]
+
+    r = y + 1.402 * (cr - 0.5)
+    g = y - (0.114*1.772 * (cb-0.5) + 0.299 * 1.402* (cr -0.5 ) ) / 0.587
+    b = y + 1.772 * (cb -0.5)
+
+    return torch.stack([r,g,b,], dim=-3)
+    
+
+def lightness(x: torch.Tensor, c_dim=-3, keepdim=False):
+    """
+    uses Y204 (Adobe) https://en.wikipedia.org/wiki/HSL_and_HSV#Lightness
+    """
+    color_weights = torch.Tensor([0.212, 0.701, 0.087]).to(x.device).to(x.dtype)
+    to_unsqueeze = abs(c_dim+1)
+    for _ in range(to_unsqueeze):
+        color_weights = color_weights.unsqueeze(-1)
+    return (color_weights* x).mean(dim=c_dim, keepdim=keepdim)
+
+
+
+
 def pad_sequence(seq:List[torch.Tensor], max_seq_len):
     """
     pads the first dim to max_seq_len and stacks
