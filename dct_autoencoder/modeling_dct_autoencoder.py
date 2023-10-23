@@ -167,18 +167,27 @@ class DCTAutoencoder(PreTrainedModel):
                 return rearrange(x, '... (c p1 p2) -> ... c (p1 p2)', c=c,p1=p1,p2=p2)
 
             # returns loss, but not reducing over input image channels
-            patch_hats = pull_out_channels(dct_patches.patches)[mask]
-            patch = pull_out_channels(input_patches)[mask]
-            rec_loss = reduce((patch_hats - patch) ** 2, '... c (p1 p2) -> c', 'mean', p1=self.config.patch_size, p2=self.config.patch_size)
+            patch_hats = pull_out_channels(dct_patches.patches)
+            patch = pull_out_channels(input_patches)
+
+
+            # the loss of patch (0,0) is very important and gets it's own loss
+            # this is the loss of the DCT element 0,0, which is the mean pixel value
+            zz_m = mask & torch.logical_and(dct_patches.patch_positions[..., 0] == 0, dct_patches.patch_positions[..., 1] == 0)
+            patchzz_loss = F.mse_loss(patch_hats[zz_m][..., 0], patch[zz_m][..., 0])
+
+            rec_loss = reduce((patch_hats[mask] - patch[mask]) ** 2, '... c (p1 p2) -> c', 'mean', p1=self.config.patch_size, p2=self.config.patch_size)
             y_loss, cb_loss, cr_loss = rec_loss
         else:
             y_loss, cb_loss, cr_loss = 0.0, 0.0, 0.0
+            patchzz_loss = 0.0
 
         return dict(
             dct_patches=dct_patches,
             perplexity=perplexity,
             commit_loss=vq_loss,
             codes=codes,
+            patchzz_loss=patchzz_loss,
             y_loss=y_loss,
             cb_loss=cb_loss,
             cr_loss=cr_loss,

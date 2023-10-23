@@ -252,7 +252,7 @@ def train(
                             perplexity=out["perplexity"].item(),
                             batch_len=batch_len,
                             seq_len=seq_len,
-                            loss = loss,
+                            loss = loss.item(),
                             **get_loss_dict(out),
             )
             if image:
@@ -348,9 +348,9 @@ def main(
     commitment_loss_weight_end:float = 1e-8,
     lfq_entropy_loss_start:float = 5e1,
     lfq_entropy_loss_end:float = 1e-1,
-    learning_rate:float = 1e-3,
-    learning_rate_ft:float = 8e-4,
-    loss_weight: dict[str,float] = {"y_loss": 4.0},
+    learning_rate:float = 8e-4,
+    learning_rate_ft:float = 5e-4,
+    loss_weight: dict[str,float] = {"y_loss": 4.0, "patchzz_loss": 1.0},
 ):
     model_config = DCTAutoencoderConfig.from_json_file(model_config_path)
 
@@ -423,6 +423,7 @@ def main(
         feature_dim=model_config.feature_dim,
         n_attention_heads = model_config.n_attention_heads,
         patch_size=model_config.patch_size,
+        **loss_weight,
     )
 
     print("starting run: ", run_d)
