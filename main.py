@@ -73,6 +73,8 @@ def make_image_grid(x, x_hat, filename=None, n: int = 10, max_size: int = 1024):
 
     ims = [transforms.Resize(512, max_size=max_size)(im) for im in ims]
 
+    ims = [im.clamp(0.0, 1.0) for im in ims]
+
     sizes = [im.shape for im in ims]
     h = max([s[1] for s in sizes])
     w = max([s[2] for s in sizes])
@@ -171,6 +173,14 @@ def train_patch_norm(patch_norm: PatchNorm,
     patch_norm = patch_norm.to(dtype)
     return patch_norm
 
+def __set_lr(
+        optimizer,lr
+        ):
+    for g in optimizer.param_groups:
+        g["lr"] = lr
+
+
+
 
 def train(
     autoencoder: DCTAutoencoder,
@@ -191,6 +201,7 @@ def train(
     vq_callables: List[Callable[[int], dict]] = [],
     rng=None,
     save_every=1000,
+    use_pixel_loss=False,
     loss_weight={},
 ):
     if optimizer is None:
@@ -209,8 +220,8 @@ def train(
 
             # ----- LR Warmup -----
             if epoch_i == 0 and i < warmup_steps:
-                for g in optimizer.param_groups:
-                    g["lr"] = ((i + 1) / warmup_steps) * learning_rate
+                _lr = ((i + 1) / warmup_steps) * learning_rate
+                __set_lr(optimizer, _lr)
 
 
             batch = batch.to(device)
@@ -238,7 +249,7 @@ def train(
             optimizer.zero_grad()
 
 
-            out = train_step(batch, autoencoder, proc)
+            out = train_step(batch, autoencoder, proc, decode_pixels=use_pixel_loss)
 
             loss = 0.0
             for k,v in out.items():
@@ -360,10 +371,10 @@ def main(
     num_workers:int=0,
     use_wandb: bool = False,
     train_norm_iters: int = 10,
-    max_iters:int = 300,
+    max_iters:int = 10000,
     sample_patches_beta:float= 2.5,
     batch_size_ft: int = 16,
-    max_iters_ft:int = 100,
+    max_iters_ft:int = 10000,
     sample_patches_beta_ft:float = 0.01,
     commitment_loss_weight_start:float = 5e-3,
     commitment_loss_weight_end:float = 1e-9,
@@ -372,6 +383,9 @@ def main(
     learning_rate:float = 1e-3,
     learning_rate_ft:float = 5e-4,
     loss_weight: dict[str,float] = {},
+    max_iters_pixel_loss: int =  5000,
+    batch_size_pixel_loss: int = 8,
+    seed: int=42,
 ):
     model_config = DCTAutoencoderConfig.from_json_file(model_config_path)
 
@@ -445,7 +459,7 @@ def main(
     if use_wandb:
         wandb.init(project="vq-experiments", config=run_d)
 
-    rng = random.Random(42)
+    rng = random.Random(seed)
 
     # ----------- Norm Training ---------------
     if train_norm_iters > 0:
@@ -506,6 +520,30 @@ def main(
             rng=rng,
             loss_weight=loss_weight,
         )
+
+    # this trains using long sequence lengths as well as pixel loss
+    if max_iters_pixel_loss > 0:
+        print("------ft model with pixel loss--------")
+        processor.sample_patches_beta = sample_patches_beta_ft
+        processor.max_seq_len = max_seq_len_ft
+        processor, _ = train(
+            autoencoder=autoencoder,
+            proc=processor,
+            train_ds=train_ds,
+            optimizer=optimizer,
+            device=device,
+            dtype=dtype,
+            learning_rate=learning_rate_ft,
+            batch_size=batch_size_pixel_loss,
+            use_wandb=use_wandb,
+            warmup_steps=warmup_steps,
+            num_workers=num_workers,
+            max_steps=max_iters_pixel_loss,
+            rng=rng,
+            loss_weight=loss_weight,
+            use_pixel_loss=True,
+        )
+
 
     print("done with all training")
     autoencoder.save_pretrained(OUTDIR + "/model/")

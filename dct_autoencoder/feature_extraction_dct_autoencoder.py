@@ -128,13 +128,10 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         og_dtype = x.dtype
         return dct2(x.to(torch.float32), 'ortho').to(og_dtype)
 
-    @torch.no_grad()
     def _transform_image_out(self, x):
         og_dtype = x.dtype
         image = idct2(x.to(torch.float32), 'ortho').to(og_dtype)
         image = ycbcr_to_rgb(image)
-        # TODO clamp
-        image = image.clamp(0.0, 1.0)
         return image
             
 
@@ -249,7 +246,6 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
                 yield batch
 
 
-    @torch.no_grad()
     def postprocess(self, x: DCTPatches) -> List[torch.Tensor]:
         """
         x: DCTPatches that are not normalized
@@ -350,8 +346,11 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         # s c
         mags = x.abs().amax(-1)
 
-        # sorts by magnitude
-        _, per_channel_sorted_idx = mags.sort(dim=0, descending=True)
+        # distances from upper left corner
+        distances = ((h_indices + w_indices) * - 0.1).flatten()
+
+        # sorts by magnitude and distance
+        _, per_channel_sorted_idx = (mags + distances.unsqueeze(-1)).sort(dim=0, descending=True)
 
 
         # k is the full length of dct patches needed to fully (losslessly)
