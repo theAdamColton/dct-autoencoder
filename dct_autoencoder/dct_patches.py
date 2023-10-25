@@ -8,6 +8,8 @@ class DCTPatches:
     key_pad_mask: torch.BoolTensor
     attn_mask: torch.BoolTensor
     batched_image_ids: torch.LongTensor
+    # b,s
+    patch_channels: torch.LongTensor
     # b,s,2
     patch_positions: torch.LongTensor
     # ph, pw of the patches
@@ -28,33 +30,9 @@ class DCTPatches:
         self.key_pad_mask = self.key_pad_mask.to(what)
         self.attn_mask = self.attn_mask.to(what)
         self.batched_image_ids = self.batched_image_ids.to(what)
+        self.patch_channels = self.patch_channels.to(what)
         self.patch_positions = self.patch_positions.to(what)
         return self
-
-def concat_dctpatches(patches: List[DCTPatches]) -> DCTPatches:
-    new_patches = torch.concat([p.patches for p in patches])
-    key_pad_mask = torch.concat([p.key_pad_mask for p in patches])
-    attn_mask = torch.concat([p.attn_mask for p in patches])
-    batched_image_ids = torch.concat([p.batched_image_ids for p in patches])
-    patch_positions = torch.concat([p.patch_positions for p in patches])
-
-    patch_sizes = []
-    for p in patches:
-        patch_sizes = patch_sizes + p.patch_sizes
-
-    original_sizes = []
-    for p in patches:
-        original_sizes = original_sizes + p.original_sizes
-
-    return DCTPatches(
-            patches=new_patches,
-            key_pad_mask=key_pad_mask,
-            attn_mask=attn_mask,
-            batched_image_ids=batched_image_ids,
-            patch_positions=patch_positions,
-            patch_sizes=patch_sizes,
-            original_sizes=original_sizes,
-            )
 
 def slice_dctpatches(p: DCTPatches, i:int) -> Tuple[DCTPatches, DCTPatches]:
     if i >= p.patches.shape[0]:
@@ -68,6 +46,7 @@ def slice_dctpatches(p: DCTPatches, i:int) -> Tuple[DCTPatches, DCTPatches]:
                 p.key_pad_mask[:i],
                 p.attn_mask[:i],
                 p.batched_image_ids[:i],
+                p.patch_channels[:i],
                 p.patch_positions[:i],
                 p.patch_sizes[:n_images_p1],
                 p.original_sizes[:n_images_p1],
@@ -77,6 +56,7 @@ def slice_dctpatches(p: DCTPatches, i:int) -> Tuple[DCTPatches, DCTPatches]:
                 p.key_pad_mask[i:],
                 p.attn_mask[i:],
                 p.batched_image_ids[i:],
+                p.patch_channels[i:],
                 p.patch_positions[i:],
                 p.patch_sizes[n_images_p1:],
                 p.original_sizes[n_images_p1:],

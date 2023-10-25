@@ -1,5 +1,5 @@
 import torch.nn.functional as F
-from typing import Optional, List
+from typing import Optional, List, Tuple
 import torch
 from torch import nn
 import matplotlib.pyplot as plt
@@ -290,6 +290,35 @@ def imshow(x: torch.Tensor, ax=None):
 
 def is_triangular_number(x: int):
     return (8 * x + 1) ** 0.5 % 1 > 0
+
+
+def get_upper_left_tri_p_w_channel_preferences(shape, p: float, channel_preferences: Tuple):
+    """
+    shape: tuple of sizes: c, h, w
+
+    p: percent unmasked, or percent integrity
+    p=0.0 means no compression or loss, the mask is all ones
+
+    the mask returned is 0 where the value should be dropped/zeroed and 1
+    where the value should be kept
+
+    channel_preferences: a tuple of floats indicating the relative importance
+    of each channel, example: (4, 1, 1) if channel 0 is 4 times as important as
+    channel 1 and channel 2
+
+    """
+    c,h,w = shape
+
+    prefs = torch.Tensor(channel_preferences)
+    prefs = prefs / prefs.sum()
+
+    channel_ps = prefs * c * p
+
+
+    tri_masks = [get_upper_left_tri_p((h,w), channel_p.item()) for channel_p in channel_ps]
+    tri_masks = torch.stack(tri_masks, dim=0)
+
+    return tri_masks
 
 
 def get_upper_left_tri_p(shape, p: float):

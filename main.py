@@ -1,4 +1,4 @@
-from typing import Callable, List
+from typing import Callable, List, Optional
 from tqdm import tqdm
 import torch
 import webdataset as wds
@@ -48,12 +48,14 @@ def get_collate_fn(processor: DCTAutoencoderFeatureExtractor):
         positions = []
         original_sizes = []
         patch_sizes = []
+        channels = []
         for d in x:
             patches.append(d["patches"])
             positions.append(d["positions"])
             original_sizes.append(d["original_sizes"])
             patch_sizes.append(d["patch_sizes"])
-        return patches, positions, original_sizes, patch_sizes
+            channels.append(d['channels'])
+        return patches, positions, channels, original_sizes, patch_sizes
 
     return collate
 
@@ -98,6 +100,9 @@ def train_step(
            ):
     if max_batch_n is not None:
         batch = slice_dctpatches(batch, max_batch_n)[0]
+
+    batch = autoencoder._normalize(batch)
+
     input_patches = batch.patches
     
     res = autoencoder(batch, return_loss)
@@ -106,9 +111,12 @@ def train_step(
 
     if decode_pixels:
         # inverse normalization for output_patches
-        output_patches.patches = autoencoder.patchnorm.inverse_norm(output_patches.patches, output_patches.h_indices, output_patches.w_indices)
-
+        output_patches.patches = autoencoder.patchnorm.inverse_norm(output_patches.patches, output_patches.patch_channels, output_patches.h_indices, output_patches.w_indices)
         images_hat = proc.postprocess(output_patches)
+
+
+        # inverse normalization for input patches
+        input_patches = autoencoder.patchnorm.inverse_norm(input_patches, output_patches.patch_channels, output_patches.h_indices, output_patches.w_indices)
         output_patches.patches = input_patches
         images = proc.postprocess(output_patches)
 
@@ -151,7 +159,7 @@ def train_patch_norm(patch_norm: PatchNorm,
         batch = batch.to(device)
         batch.patches = batch.patches.to(torch.float32)
         normalized_patches = patch_norm.forward(
-            batch.patches, batch.h_indices, batch.w_indices, batch.key_pad_mask
+            batch.patches, batch.patch_channels, batch.h_indices, batch.w_indices, batch.key_pad_mask
         )
         mean = normalized_patches[~batch.key_pad_mask].mean() .item()
         std = normalized_patches[~batch.key_pad_mask].std()   .item()
@@ -174,7 +182,7 @@ def train(
     epochs: int = 1,
     device="cuda",
     dtype=torch.bfloat16,
-    log_every=20,
+    log_every=50,
     n_log: int = 10,
     max_steps:int=1000000,
     num_workers:int=0,
@@ -182,6 +190,7 @@ def train(
     use_wandb: bool = False,
     vq_callables: List[Callable[[int], dict]] = [],
     rng=None,
+    save_every=1000,
     loss_weight={},
 ):
     if optimizer is None:
@@ -220,9 +229,12 @@ def train(
                     out["x"], out["x_hat"], filename=f"{OUTDIR}/train image {i:04}.png"
                 )
                 image=wandb.Image(image)
+                import bpdb
+                bpdb.set_trace()
                 out = None
             else:
                 image=None
+
 
             optimizer.zero_grad()
 
@@ -275,6 +287,9 @@ def train(
             if i > max_steps:
                 break
 
+            if i % save_every == 0 and i > 0:
+                autoencoder.save_pretrained(OUTDIR + "/model/")
+
     return autoencoder, optimizer
 
 
@@ -293,8 +308,8 @@ def load_and_transform_dataset(
 
     def preproc(x):
         x['pixel_values'] = x['pixel_values'].to(device)
-        patches, positions, original_sizes, patch_sizes = dct_processor.preprocess([x["pixel_values"]])
-        x["patches"], x["positions"], x["original_sizes"], x["patch_sizes"]  = patches[0], positions[0], original_sizes[0], patch_sizes[0]
+        patches, positions, channels, original_sizes, patch_sizes = dct_processor.preprocess([x["pixel_values"]])
+        x["patches"], x["positions"], x['channels'], x["original_sizes"], x["patch_sizes"]  = patches[0], positions[0], channels[0], original_sizes[0], patch_sizes[0]
         return x
 
     ds = (
@@ -304,7 +319,7 @@ def load_and_transform_dataset(
         .decode("torchrgb", partial=True, handler=wds.handlers.warn_and_continue)
         .rename(pixel_values="jpg", handler=wds.handlers.warn_and_continue)
         .map(preproc, handler=wds.handlers.warn_and_continue)
-        .rename_keys(patches="patches", positions="positions", original_sizes="original_sizes", patch_sizes="patch_sizes",)
+        .rename_keys(patches="patches", positions="positions", channels='channels', original_sizes="original_sizes", patch_sizes="patch_sizes", )
     )
 
     return ds
@@ -315,17 +330,23 @@ def get_model(model_config: DCTAutoencoderConfig,
               dtype,
               sample_patches_beta,
               max_seq_len,
+              resume_path,
               ):
 
     proc = DCTAutoencoderFeatureExtractor(
         channels=model_config.image_channels,
         patch_size=model_config.patch_size,
         sample_patches_beta=sample_patches_beta,
-        max_n_patches=model_config.max_n_patches,
+        max_patch_h=model_config.max_patch_h,
+        max_patch_w=model_config.max_patch_w,
         max_seq_len=max_seq_len,
     )
 
-    model = DCTAutoencoder(model_config).to(dtype).to(device)
+    if resume_path is not None:
+        model = DCTAutoencoder.from_pretrained(resume_path).to(dtype).to(device)
+        print("Loaded from ", resume_path)
+    else:
+        model = DCTAutoencoder(model_config).to(dtype).to(device)
 
     return model, proc
 
@@ -333,6 +354,7 @@ def get_model(model_config: DCTAutoencoderConfig,
 def main(
     image_dataset_path_or_url:str = None,
     model_config_path = "./conf/patch4_small.json",
+    resume_path: Optional[str] = None,
     device="cuda",
     dtype=torch.bfloat16,
     batch_size: int = 32,
@@ -344,13 +366,13 @@ def main(
     batch_size_ft: int = 16,
     max_iters_ft:int = 100,
     sample_patches_beta_ft:float = 0.01,
-    commitment_loss_weight_start:float = 5e-4,
-    commitment_loss_weight_end:float = 1e-8,
+    commitment_loss_weight_start:float = 5e-3,
+    commitment_loss_weight_end:float = 1e-9,
     lfq_entropy_loss_start:float = 5e1,
     lfq_entropy_loss_end:float = 1e-1,
-    learning_rate:float = 8e-4,
+    learning_rate:float = 1e-3,
     learning_rate_ft:float = 5e-4,
-    loss_weight: dict[str,float] = {"y_loss": 4.0, "patchzz_loss": 1.0},
+    loss_weight: dict[str,float] = {},
 ):
     model_config = DCTAutoencoderConfig.from_json_file(model_config_path)
 
@@ -366,19 +388,17 @@ def main(
     # - ln(0.1) / beta = x
 
     cdf_p = 0.95
+    image_channels: int = model_config.image_channels
     max_seq_len = round(-1*math.log(1-cdf_p) / sample_patches_beta)
     max_seq_len = power_of_two(max_seq_len)
-    max_seq_len = min(model_config.max_n_patches, max_seq_len)
+    max_seq_len = min(model_config.max_patch_h * model_config.max_patch_w * image_channels, max_seq_len)
+    max_seq_len_ft= model_config.max_patch_h * model_config.max_patch_w * image_channels
 
-    max_seq_len_ft= model_config.max_n_patches#round(-1*math.log(1-cdf_p) / sample_patches_beta_ft)
-    #max_seq_len_ft = power_of_two(max_seq_len_ft)
-
-    autoencoder, processor = get_model(model_config, device, dtype, sample_patches_beta, max_seq_len)
+    autoencoder, processor = get_model(model_config, device, dtype, sample_patches_beta, max_seq_len, resume_path)
 
     autoencoder.vq_model.entropy_loss_weight = lfq_entropy_loss_start
     autoencoder.vq_model.commitment_loss_weight = commitment_loss_weight_start
 
-    image_channels: int = model_config.image_channels
     warmup_steps = 50
 
     commitment_loss_weight_n = max_iters
@@ -397,8 +417,6 @@ def main(
         device=device if num_workers == 0 else 'cpu',
     )
 
-    bits = model_config.vq_num_codebooks * math.log2(model_config.vq_codebook_size) * processor.max_n_patches
-
     n_params = 0
     for n,p in autoencoder.named_parameters():
         if 'patchnorm' not in n:
@@ -409,8 +427,6 @@ def main(
         sample_patches_beta=sample_patches_beta,
         max_seq_len=max_seq_len,
         max_seq_len_ft = max_seq_len_ft,
-        compression_over_patches=(processor.max_n_patches * image_channels * model_config.patch_size**2 * 16)  / bits,
-        compression_over_image=(512 ** 2 * image_channels * 8)/bits,
         learning_rate=learning_rate,
         commitment_loss_weight_start=commitment_loss_weight_start,
         commitment_loss_weight_end=commitment_loss_weight_end,
@@ -433,56 +449,66 @@ def main(
     rng = random.Random(42)
 
     # ----------- Norm Training ---------------
-    print("training norm")
-    processor.sample_patches_beta = 0.0
-    processor.max_seq_len = model_config.max_n_patches
-    autoencoder.patchnorm = train_patch_norm(autoencoder.patchnorm,
-                                       processor,
-                                       train_ds, dtype, device, batch_size=min(batch_size, 32), steps=train_norm_iters,rng=rng)
-    processor.max_seq_len = max_seq_len 
-    processor.sample_patches_beta = sample_patches_beta
-    print("done training norm")
+    if train_norm_iters > 0:
+        print("training norm")
+        processor.sample_patches_beta = 0.0
+        processor.max_seq_len = model_config.max_patch_h * model_config.max_patch_w * 3
+        autoencoder.patchnorm = train_patch_norm(autoencoder.patchnorm,
+                                           processor,
+                                           train_ds, dtype, device, batch_size=min(batch_size, 32), steps=train_norm_iters,rng=rng)
+        processor.max_seq_len = max_seq_len 
+        processor.sample_patches_beta = sample_patches_beta
+        print("done training norm")
+
+    optimizer = torch.optim.Adam(autoencoder.parameters(), lr=1e-9)
 
     # This trains using shorter sequence lengths
-    autoencoder, optimizer = train(
-        autoencoder,
-        processor,
-        train_ds,
-        device=device,
-        dtype=dtype,
-        learning_rate=learning_rate,
-        batch_size=batch_size,
-        use_wandb=use_wandb,
-        warmup_steps=warmup_steps,
-        num_workers=num_workers,
-        max_steps=max_iters,
-        vq_callables=vq_callables,
-        rng=rng,
-        loss_weight=loss_weight,
-    )
+    if max_iters > 0:
+        autoencoder, optimizer = train(
+            autoencoder,
+            processor,
+            train_ds,
+            device=device,
+            dtype=dtype,
+            learning_rate=learning_rate,
+            batch_size=batch_size,
+            use_wandb=use_wandb,
+            warmup_steps=warmup_steps,
+            num_workers=num_workers,
+            max_steps=max_iters,
+            vq_callables=vq_callables,
+            rng=rng,
+            loss_weight=loss_weight,
+            optimizer=optimizer,
+        )
 
     # this trains using longer sequence lengths and a smaller batch size
-    print("------ft model--------")
-    processor.sample_patches_beta = sample_patches_beta_ft
-    processor.max_seq_len = max_seq_len_ft
-    processor, _ = train(
-        autoencoder,
-        processor,
-        train_ds,
-        optimizer=optimizer,
-        device=device,
-        dtype=dtype,
-        learning_rate=learning_rate_ft,
-        batch_size=batch_size_ft,
-        use_wandb=use_wandb,
-        warmup_steps=warmup_steps,
-        num_workers=num_workers,
-        max_steps=max_iters_ft,
-        vq_callables=vq_callables,
-        rng=rng,
-        loss_weight=loss_weight,
-    )
+    lfq_decay_fn = get_decay_fn(lfq_entropy_loss_start, lfq_entropy_loss_end, max_iters_ft)
+    commitment_loss_weight_fn = get_decay_fn(commitment_loss_weight_start, commitment_loss_weight_end, max_iters_ft)
+    vq_callables = [lambda i: {"entropy_loss_weight":lfq_decay_fn(i),"commitment_loss_weight":commitment_loss_weight_fn(i)} ]
+    if max_iters_ft > 0:
+        print("------ft model--------")
+        processor.sample_patches_beta = sample_patches_beta_ft
+        processor.max_seq_len = max_seq_len_ft
+        processor, _ = train(
+            autoencoder,
+            processor,
+            train_ds,
+            optimizer=optimizer,
+            device=device,
+            dtype=dtype,
+            learning_rate=learning_rate_ft,
+            batch_size=batch_size_ft,
+            use_wandb=use_wandb,
+            warmup_steps=warmup_steps,
+            num_workers=num_workers,
+            max_steps=max_iters_ft,
+            vq_callables=vq_callables,
+            rng=rng,
+            loss_weight=loss_weight,
+        )
 
+    print("done with all training")
     autoencoder.save_pretrained(OUTDIR + "/model/")
 
     if use_wandb:

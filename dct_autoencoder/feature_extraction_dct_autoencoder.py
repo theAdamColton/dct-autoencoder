@@ -68,7 +68,7 @@ v
 """
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from functools import partial
 from einops import rearrange
 import torch
@@ -93,6 +93,8 @@ class GroupPatchesState:
     groups_pos: List[List[Tensor]]
     group: List[Tensor]
     group_pos: List[Tensor]
+    groups_channels: List[List[Tensor]]
+    group_channels: List[Tensor]
     seq_len: int
 
 class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
@@ -101,15 +103,20 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         channels: int,
         patch_size: int,
         sample_patches_beta: float,
-        max_n_patches: int,
+        max_patch_h: int,
+        max_patch_w: int,
         max_seq_len: int,
         token_dropout_prob=None,
+        channel_importances:Tuple[float,float,float] = (4,1,1),
     ):
         self.channels = channels
         self.patch_size = patch_size
         self.sample_patches_beta = sample_patches_beta
-        self.max_n_patches = max_n_patches
+        self.max_patch_h = max_patch_h
+        self.max_patch_w = max_patch_w
         self.max_seq_len = max_seq_len
+        self.channel_importances = torch.Tensor(channel_importances)
+        self.channel_importances = self.channel_importances / self.channel_importances.sum()
 
         # what percent of tokens to dropout
         # if int or float given, then assume constant dropout prob
@@ -166,42 +173,47 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
 
         patched_ims = []
         positions = []
+        all_channels = []
         for cropped_im in cropped_ims:
-            patches, pos = self._patch_image(cropped_im)
+            patches, pos, channels = self._patch_image(cropped_im)
             patched_ims.append(patches)
             positions.append(pos)
+            all_channels.append(channels)
 
-        return patched_ims, positions, original_sizes, patch_sizes
+        return patched_ims, positions, all_channels, original_sizes, patch_sizes
 
     @torch.no_grad()
     def iter_batches(self, dataloader, batch_size: Optional[int] = None):
         """
-        dataloader: iterable, returns [patches, positions, original_sizes, patch_sizes]
+        dataloader: iterable, returns [patches, positions, channels, original_sizes, patch_sizes]
         """
 
         state = None
         cum_original_sizes = []
         cum_patch_sizes = []
         while True:
-            patches, positions, original_sizes, patch_sizes = next(dataloader)
+            patches, positions, channels, original_sizes, patch_sizes = next(dataloader)
 
             # keeps on cpu, as to not waste gpu space
             patches = [p.to('cpu') for p in patches]
             positions = [p.to('cpu') for p in positions]
+            channels = [c.to('cpu') for c in channels]
 
             cum_original_sizes = cum_original_sizes + original_sizes
             cum_patch_sizes = cum_patch_sizes + patch_sizes
 
-            state = self._group_patches_by_max_seq_len(patches, positions, state)
+            state = self._group_patches_by_max_seq_len(patches, positions, channels, state)
 
             if batch_size is None:
                 # immediately output a batch for this state
                 if len(state.group) > 0:
                     state.groups.append(state.group)
                     state.groups_pos.append(state.group_pos)
+                    state.groups_channels.append(state.group_channels)
                     state.seq_len = 0
                     state.group = []
                     state.group_pos = []
+                    state.group_channels = []
 
             cur_batch_size = len(state.groups)
 
@@ -212,11 +224,15 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
                         groups_pos = state.groups_pos[batch_size:],
                         group=state.group,
                         group_pos=state.group_pos,
+                        groups_channels=state.groups_channels[batch_size:],
+                        group_channels=state.group_channels,
                         seq_len=state.seq_len,
                 )
                 state = GroupPatchesState(
                         groups=state.groups[:batch_size],
                         groups_pos = state.groups_pos[:batch_size],
+                        groups_channels=state.groups_channels[:batch_size],
+                        group_channels=[],
                         group=[],
                         group_pos=[],
                         seq_len=0,
@@ -229,7 +245,7 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
                 cum_original_sizes = cum_original_sizes[:n_items_in_batch]
                 cum_patch_sizes = cum_patch_sizes[:n_items_in_batch]
 
-                batch = self._batch_groups(state.groups, state.groups_pos, original_sizes = cum_original_sizes, patch_sizes = cum_patch_sizes)
+                batch = self._batch_groups(state.groups, state.groups_pos, state.groups_channels, original_sizes = cum_original_sizes, patch_sizes = cum_patch_sizes)
 
                 if batch_size is not None:
                     assert batch.patches.shape[0] == batch_size
@@ -237,6 +253,7 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
                     assert batch.batched_image_ids.shape[0] == batch_size
                     assert batch.patch_positions.shape[0] == batch_size
                     assert batch.attn_mask.shape[0] == batch_size
+                    assert batch.patch_channels.shape[0] == batch_size
 
                 cum_patch_sizes = new_patch_sizes
                 cum_original_sizes = new_original_sizes
@@ -275,6 +292,9 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         p_h = int(h / self.patch_size)
         p_w = int(w / self.patch_size)
 
+        p_h = min(p_h, self.max_patch_h)
+        p_w = min(p_w, self.max_patch_w)
+
         # crop height and crop width
         c_h = p_h * self.patch_size
         c_w = p_w * self.patch_size
@@ -285,6 +305,8 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         assert c_w <= w
         assert c_h >= self.patch_size
         assert c_w >= self.patch_size
+        assert c_h <= self.patch_size * self.max_patch_h
+        assert c_w <= self.patch_size * self.max_patch_w
 
         return c_h, c_w
 
@@ -308,7 +330,7 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
 
     @torch.no_grad()
     def _patch_image(self, x: torch.Tensor):
-        _, h, w = x.shape
+        c, h, w = x.shape
 
         assert h % self.patch_size == 0
         assert w % self.patch_size == 0
@@ -322,44 +344,86 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
 
         _, indices_flat = tri_distances.view(-1).sort()
 
+        # k is the full length of dct patches needed to fully (losslessly)
+        # represent x
+
+        # k gets downsampled in two ways:
+        # k can't be larger than the max number of patches or the current max
+        # sequence length
+
+        # also if sample_patches_beta is set, then k will be sampled from the
+        # exponential distribution
         k = len(indices_flat)
-        k = min(k, self.max_n_patches)
+
+        k = min(k, self.max_patch_h * self.max_patch_w)
         k = min(k, self.max_seq_len)
-        # takes the top p closest distances (that are under self.max_n_patches)
+
         if self.sample_patches_beta > 0.00:
-            p = max(min(exp_dist(self.sample_patches_beta), 1.0), 0.01)
-        else:
-            p=1.0
-        k = round(k * p)
-        k = max(1, k)
-        k = min(self.max_n_patches, k)
+            # samples from the exponential distribution to get k
+            k = min(round(exp_dist(self.sample_patches_beta)), k)
+            k = max(1, k)
 
         indices_flat = indices_flat[:k]
 
         # patches x into a list of patches
-        x = rearrange(x, "c (h p1) (w p2) -> (h w) (c p1 p2)", p1=self.patch_size, p2=self.patch_size, c = self.channels)
+        x = rearrange(x, "c (h p1) (w p2) -> (h w) c (p1 p2)", p1=self.patch_size, p2=self.patch_size, c = self.channels)
 
+        # now splits up the k patches between the channels
+        # each channel gets it's own patches
+        channel_k = (self.channel_importances * k).round().long()
+        _total_channel_k = channel_k.sum()
+        channel_k[0] = channel_k[0] - (_total_channel_k - k)
+        assert channel_k.sum() == k
 
-        # takes top k patches, and their indices
-        x = x[indices_flat,:]
+        h_indices_f = h_indices.reshape(-1)
+        w_indices_f = w_indices.reshape(-1)
+
+        x_out = []
+        channels = []
+        positions_h = []
+        positions_w = []
+        for i in range(c):
+            ind = indices_flat[:channel_k[i].item()]
+            x_c = x[ind, i, :]
+            x_out.append(x_c)
+            channels.append(
+                    torch.Tensor([i] * channel_k[i])
+            )
+
+            positions_h.append(
+                    h_indices_f[ind]
+                    )
+            positions_w.append(
+                    w_indices_f[ind]
+                    )
+
+        channels = torch.concat(channels)
+        channels = channels.to(x.dtype).to(torch.long)
+
+        positions_h = torch.concat(positions_h)
+        positions_w = torch.concat(positions_w)
+        pos = torch.stack([positions_h, positions_w], dim=-1)
+
+        # shape k, z
+        x_out = torch.concat(x_out, dim=0)
+
         h_indices = h_indices.flatten()[indices_flat]
         w_indices = w_indices.flatten()[indices_flat]
 
-        s, z = x.shape
-        assert z == self.channels * self.patch_size ** 2, f"{z} != {self.channels * self.patch_size ** 2}"
+
+        s, z = x_out.shape
+        assert z == self.patch_size ** 2, f"{z} != {self.patch_size ** 2}"
         assert s == k
 
         # x is shape c, k
-        # h_indices is shape k
-        # w_indices is shape k
-        pos = torch.stack([h_indices, w_indices], dim=-1)
-        return x, pos 
+        return x_out, pos, channels
 
     @torch.no_grad()
     def _group_patches_by_max_seq_len(
             self,
             batched_patches: List[Tensor],
             batched_positions: List[Tensor],
+            batched_channels: List[Tensor],
             state: Optional[GroupPatchesState]=None,
             ) -> GroupPatchesState:
         """
@@ -367,32 +431,39 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         """
         if state is None:
             groups = []
-            groups_pos = []
             group = []
+            groups_pos = []
             group_pos = []
+            groups_channels = []
+            group_channels = []
             seq_len = 0
-            state = GroupPatchesState(groups, groups_pos, group, group_pos, seq_len)
+            state = GroupPatchesState(groups, groups_pos, group, group_pos, groups_channels, group_channels, seq_len)
 
-
-
-        for patches, pos in zip(batched_patches, batched_positions):
+        for patches, pos, channels in zip(batched_patches, batched_positions, batched_channels):
             assert isinstance(patches, Tensor)
+            assert isinstance(channels, Tensor)
+            assert isinstance(pos, Tensor)
 
             k, _ = patches.shape
 
             assert (
-            k <= self.max_n_patches and k <= self.max_seq_len
+            k <= self.max_patch_h*self.max_patch_w*self.channels and k <= self.max_seq_len
             ), f"patch with len {k} exceeds maximum sequence length"
+
+            assert k == channels.shape[0]
 
             if (state.seq_len + k) > self.max_seq_len:
                 state.groups.append(state.group)
                 state.groups_pos.append(state.group_pos)
+                state.groups_channels.append(state.group_channels)
                 state.group = []
                 state.group_pos = []
+                state.group_channels = []
                 state.seq_len = 0
 
             state.group.append(patches)
             state.group_pos.append(pos)
+            state.group_channels.append(channels)
             state.seq_len += k
 
         return state
@@ -401,6 +472,7 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
     def _batch_groups(self,
                grouped_batched_patches: List[List[Tensor]],
                grouped_batched_positions: List[List[Tensor]],
+               grouped_batched_channels: List[List[Tensor]],
                device=torch.device('cpu'),
                **dct_patch_kwargs,
                       ) -> DCTPatches:
@@ -411,32 +483,37 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
 
 
         assert len(grouped_batched_positions) == len(grouped_batched_patches)
+        assert len(grouped_batched_positions) == len(grouped_batched_channels)
 
         # process patches into variable lengthed sequences with attention mask
 
         num_images = []
         batched_sequences = []
         batched_positions = []
+        batched_channels = []
         batched_image_ids = []
 
-        for grouped_patches, grouped_positions in zip(grouped_batched_patches, grouped_batched_positions):
+        for grouped_patches, grouped_positions, grouped_channels in zip(grouped_batched_patches, grouped_batched_positions, grouped_batched_channels):
             assert len(grouped_patches) == len(grouped_positions)
+            assert len(grouped_channels) == len(grouped_positions)
             num_images.append(len(grouped_patches))
 
             image_ids = torch.empty((0,), device=device, dtype=torch.long)
 
-            for image_id, (patches, positions) in enumerate(zip(grouped_patches, grouped_positions)):
+            for image_id, (patches, positions, channels) in enumerate(zip(grouped_patches, grouped_positions, grouped_channels)):
                 k, z = patches.shape
 
-                assert z == self.channels * self.patch_size ** 2, f"{z} != {self.channels * self.patch_size ** 2}"
+                assert z == self.patch_size ** 2, f"{z} != {self.patch_size ** 2}"
 
                 assert positions.shape[0] == k
+                assert channels.shape[0] == k
 
                 image_ids = F.pad(image_ids, (0, k), value=image_id)
 
             batched_image_ids.append(image_ids)
             batched_sequences.append(torch.cat(grouped_patches, dim=0))
             batched_positions.append(torch.cat(grouped_positions, dim=0))
+            batched_channels.append(torch.cat(grouped_channels, dim=0))
 
         # derive key padding mask
 
@@ -463,6 +540,7 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         patches = pad_sequence(batched_sequences, self.max_seq_len).to(device)
 
         patch_positions = pad_sequence(batched_positions, self.max_seq_len).to(device)
+        patch_channels = pad_sequence(batched_channels, self.max_seq_len).to(device)
 
         # need to know how many images for final attention pooling
 
@@ -474,6 +552,7 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
             attn_mask=attn_mask,
             batched_image_ids=batched_image_ids,
             patch_positions=patch_positions,
+            patch_channels=patch_channels,
             **dct_patch_kwargs,
         )
 
@@ -490,23 +569,24 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
 
         images = []
 
-        for batch_i, (image_ids, mask, positions) in enumerate(
-            zip(output.batched_image_ids, output.key_pad_mask, output.patch_positions,)
+        for batch_i, (image_ids, mask, positions, channels) in enumerate(
+            zip(output.batched_image_ids, output.key_pad_mask, output.patch_positions, output.patch_channels)
         ):
             # take the tokens that have actual images associated with them
             for image_id in image_ids.unique():
-                image_mask = (image_ids == image_id) & ~mask
-                image_tokens = x[batch_i, image_mask, :]
-                image_positions = positions[image_mask]
+                is_image = (image_ids == image_id) & ~mask
+                tokens_from_image = x[batch_i, is_image, :]
+                positions_from_image = positions[is_image]
+                channels_from_image = channels[is_image]
                 ph, pw = output.patch_sizes[len(images)]
 
-                image = torch.zeros(ph, pw, z, dtype=x.dtype, device=x.device)
+                image = torch.zeros(self.channels, ph, pw, z, dtype=x.dtype, device=x.device)
 
-                for token, pos in zip(image_tokens, image_positions):
+                for token, pos, channel in zip(tokens_from_image, positions_from_image, channels_from_image):
                     pos_h,pos_w = pos.unbind(-1)
-                    image[pos_h, pos_w, :] = token 
+                    image[channel, pos_h, pos_w, :] = token 
 
-                image = rearrange(image.view(ph*pw, -1), '(ph pw) (c p1 p2) -> c (ph p1) (pw p2)', p1=self.patch_size, p2=self.patch_size, c=self.channels, ph=ph, pw=pw)
+                image = rearrange(image.view(self.channels, ph*pw, -1), 'c (ph pw) (p1 p2) -> c (ph p1) (pw p2)', p1=self.patch_size, p2=self.patch_size, ph=ph, pw=pw, c=self.channels)
                 images.append(image)
 
         return images
