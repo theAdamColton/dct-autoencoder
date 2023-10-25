@@ -6,6 +6,13 @@ import matplotlib.pyplot as plt
 from torch_dct import dct_2d, idct_2d
 import random
 import math
+from PIL import ImageDraw
+from PIL import ImageFont
+
+def add_txt_to_pil_image(image, text):
+    imd = ImageDraw.Draw(image)
+    font = ImageFont.truetype('FreeMono.ttf', 48)
+    imd.text((5, 5), text, font=font, fill =(255, 255, 255))
 
 def rgb_to_ycbcr(x:torch.Tensor):
     """

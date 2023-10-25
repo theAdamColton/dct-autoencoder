@@ -106,7 +106,6 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         max_patch_h: int,
         max_patch_w: int,
         max_seq_len: int,
-        token_dropout_prob=None,
         channel_importances:Tuple[float,float,float] = (4,1,1),
     ):
         self.channels = channels
@@ -118,18 +117,6 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         self.channel_importances = torch.Tensor(channel_importances)
         self.channel_importances = self.channel_importances / self.channel_importances.sum()
 
-        # what percent of tokens to dropout
-        # if int or float given, then assume constant dropout prob
-        # otherwise accept a callback that in turn calculates dropout prob from height and width
-        self.calc_token_dropout = None
-
-        if callable(token_dropout_prob):
-            self.calc_token_dropout = token_dropout_prob
-
-        elif isinstance(token_dropout_prob, (float, int)):
-            assert 0.0 < token_dropout_prob < 1.0
-            token_dropout_prob = float(token_dropout_prob)
-            self.calc_token_dropout = lambda *_: token_dropout_prob
 
     @torch.no_grad()
     def _transform_image_in(self, x):
@@ -292,8 +279,18 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         p_h = int(h / self.patch_size)
         p_w = int(w / self.patch_size)
 
-        p_h = min(p_h, self.max_patch_h)
-        p_w = min(p_w, self.max_patch_w)
+
+        ar = h/w
+
+        if p_h > self.max_patch_h:
+            p_h = self.max_patch_h
+            p_w = int(p_h / ar)
+        if p_w > self.max_patch_w:
+            p_w = self.max_patch_w
+            p_h = int(ar * p_w)
+
+        #p_h = min(p_h, self.max_patch_h)
+        #p_w = min(p_w, self.max_patch_w)
 
         # crop height and crop width
         c_h = p_h * self.patch_size
@@ -361,7 +358,8 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         if self.sample_patches_beta > 0.00:
             # samples from the exponential distribution to get k
             k = min(round(exp_dist(self.sample_patches_beta)), k)
-            k = max(1, k)
+            # at least the base channels are needed
+            k = max(c, k)
 
         indices_flat = indices_flat[:k]
 
@@ -371,6 +369,8 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         # now splits up the k patches between the channels
         # each channel gets it's own patches
         channel_k = (self.channel_importances * k).round().long()
+        # there should be at least one patch per channel
+        channel_k = channel_k.clamp(1)
         _total_channel_k = channel_k.sum()
         channel_k[0] = channel_k[0] - (_total_channel_k - k)
         assert channel_k.sum() == k

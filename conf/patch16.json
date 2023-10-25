@@ -1,8 +1,8 @@
 {
   "feature_dim": 512,
   "image_channels": 3,
-  "max_patches_h": 16,
-  "max_patches_w": 16,
+  "max_patch_h": 16,
+  "max_patch_w": 16,
   "n_attention_heads": 8,
   "n_layers": 4,
   "patch_size": 16,

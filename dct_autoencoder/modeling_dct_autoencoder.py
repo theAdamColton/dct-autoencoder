@@ -32,12 +32,15 @@ class DCTAutoencoder(PreTrainedModel):
 
         patch_dim = config.patch_size**2
         max_n_patches = config.max_patch_h * config.max_patch_w
-        self.encoder_pos_embed_height = nn.Parameter(torch.zeros(self.config.image_channels, max_n_patches, patch_dim))
-        self.encoder_pos_embed_width = nn.Parameter(torch.zeros(self.config.image_channels, max_n_patches, patch_dim))
+
+        self.encoder_pos_embed_channel = nn.Parameter(torch.randn(self.config.image_channels, self.config.feature_dim))
+        self.encoder_pos_embed_height = nn.Parameter(torch.randn(max_n_patches, self.config.feature_dim))
+        self.encoder_pos_embed_width = nn.Parameter(torch.randn(max_n_patches, self.config.feature_dim))
 
 
-        self.decoder_pos_embed_height = nn.Parameter(torch.zeros(self.config.image_channels, max_n_patches, config.feature_dim))
-        self.decoder_pos_embed_width = nn.Parameter(torch.zeros(self.config.image_channels, max_n_patches, config.feature_dim))
+        self.decoder_pos_embed_channel = nn.Parameter(torch.randn(self.config.image_channels, config.feature_dim))
+        self.decoder_pos_embed_height = nn.Parameter(torch.randn(max_n_patches, config.feature_dim))
+        self.decoder_pos_embed_width = nn.Parameter(torch.randn(max_n_patches, config.feature_dim))
 
         self.to_patch_embedding = nn.Sequential(
             nn.Linear(patch_dim, config.feature_dim, bias=False),
@@ -80,10 +83,11 @@ class DCTAutoencoder(PreTrainedModel):
         """
         in place
         """
-        h_pos = self.decoder_pos_embed_height[dct_patches.patch_channels, dct_patches.h_indices]
-        w_pos = self.decoder_pos_embed_width[dct_patches.patch_channels, dct_patches.w_indices]
+        c_pos = self.decoder_pos_embed_channel[dct_patches.patch_channels]
+        h_pos = self.decoder_pos_embed_height[dct_patches.h_indices]
+        w_pos = self.decoder_pos_embed_width[dct_patches.w_indices]
 
-        dct_patches.patches = dct_patches.patches + h_pos + w_pos
+        dct_patches.patches = dct_patches.patches + h_pos + w_pos + c_pos
         return dct_patches
         
 
@@ -92,10 +96,11 @@ class DCTAutoencoder(PreTrainedModel):
         """
         in place
         """
-        h_pos = self.encoder_pos_embed_height[dct_patches.patch_channels, dct_patches.h_indices]
-        w_pos = self.encoder_pos_embed_width[dct_patches.patch_channels, dct_patches.w_indices]
+        c_pos = self.encoder_pos_embed_channel[dct_patches.patch_channels]
+        h_pos = self.encoder_pos_embed_height[dct_patches.h_indices]
+        w_pos = self.encoder_pos_embed_width[dct_patches.w_indices]
 
-        dct_patches.patches = dct_patches.patches + h_pos + w_pos
+        dct_patches.patches = dct_patches.patches + h_pos + w_pos + c_pos
         return dct_patches
 
     def _normalize(self,
@@ -114,10 +119,11 @@ class DCTAutoencoder(PreTrainedModel):
         if do_normalize:
             dct_patches = self._normalize(dct_patches)
 
-        dct_patches = self._add_pos_embedding_encoder(dct_patches)
+
+        dct_patches.patches = self.to_patch_embedding(dct_patches.patches)
 
         # Adds positional embedding info
-        dct_patches.patches = self.to_patch_embedding(dct_patches.patches)
+        dct_patches = self._add_pos_embedding_encoder(dct_patches)
 
         # X-Transformers uses ~attn_mask
         dct_patches.patches = self.encoder(dct_patches.patches, attn_mask=~dct_patches.attn_mask)
@@ -153,8 +159,6 @@ class DCTAutoencoder(PreTrainedModel):
         dct_patches: DCTPatches,
         return_loss: bool = True,
     ):
-        #dct_patches = self._normalize(dct_patches)
-
         if return_loss:
             # stores the input features for the loss calculation later
             input_patches = dct_patches.patches

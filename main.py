@@ -15,7 +15,7 @@ import random
 
 from dct_autoencoder.feature_extraction_dct_autoencoder import DCTAutoencoderFeatureExtractor
 from dct_autoencoder.patchnorm import PatchNorm
-from dct_autoencoder.util import power_of_two, rgb_to_ycbcr
+from dct_autoencoder.util import power_of_two
 from dct_autoencoder.dct_patches import DCTPatches, slice_dctpatches
 from dct_autoencoder.modeling_dct_autoencoder import DCTAutoencoder
 from dct_autoencoder.configuration_dct_autoencoder import DCTAutoencoderConfig
@@ -42,7 +42,7 @@ def get_decay_fn(start_val:float, end_value:float, n:int):
         return ((n-i) / n) * start_val + (i/n) * end_value
     return fn
 
-def get_collate_fn(processor: DCTAutoencoderFeatureExtractor):
+def get_collate_fn():
     def collate(x: List[dict]):
         patches = []
         positions = []
@@ -148,7 +148,7 @@ def train_patch_norm(patch_norm: PatchNorm,
                ):
     train_ds = train_ds.shuffle(10000, rng=rng)
     dataloader = DataLoader(
-                train_ds, batch_size=batch_size, num_workers=0, collate_fn=get_collate_fn(proc)
+                train_ds, batch_size=batch_size, num_workers=0, collate_fn=get_collate_fn()
             )
 
     patch_norm = patch_norm.to(torch.float32).to(device)
@@ -196,7 +196,7 @@ def train(
     if optimizer is None:
         optimizer = torch.optim.Adam(autoencoder.parameters(), lr=1e-9)
 
-    collate_fn = get_collate_fn(proc)
+    collate_fn = get_collate_fn()
 
     # ----------- Model Training --------------
     for epoch_i, epoch in enumerate(range(epochs)):
@@ -226,11 +226,10 @@ def train(
                     out = train_step(batch, autoencoder, proc, max_batch_n=n_log, decode_pixels=True, return_loss=False)
                 autoencoder.train()
                 image = make_image_grid(
-                    out["x"], out["x_hat"], filename=f"{OUTDIR}/train image {i:04}.png"
+                    out["x"], out["x_hat"], filename=f"{OUTDIR}/train image {i:04}.png", n=n_log
                 )
+
                 image=wandb.Image(image)
-                import bpdb
-                bpdb.set_trace()
                 out = None
             else:
                 image=None
@@ -392,7 +391,7 @@ def main(
     max_seq_len = round(-1*math.log(1-cdf_p) / sample_patches_beta)
     max_seq_len = power_of_two(max_seq_len)
     max_seq_len = min(model_config.max_patch_h * model_config.max_patch_w * image_channels, max_seq_len)
-    max_seq_len_ft= model_config.max_patch_h * model_config.max_patch_w * image_channels
+    max_seq_len_ft= model_config.max_patch_h * model_config.max_patch_w
 
     autoencoder, processor = get_model(model_config, device, dtype, sample_patches_beta, max_seq_len, resume_path)
 
