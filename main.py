@@ -251,7 +251,7 @@ def train(
 
             loss.backward()
 
-            torch.nn.utils.clip_grad_norm_(autoencoder.parameters(), 5.0)
+            torch.nn.utils.clip_grad_norm_(autoencoder.parameters(), 1.0)
 
             optimizer.step()
 

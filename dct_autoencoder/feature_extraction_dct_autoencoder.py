@@ -280,17 +280,19 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         p_w = int(w / self.patch_size)
 
 
-        ar = h/w
-
-        if p_h > self.max_patch_h:
-            p_h = self.max_patch_h
-            p_w = int(p_h / ar)
-        if p_w > self.max_patch_w:
-            p_w = self.max_patch_w
-            p_h = int(ar * p_w)
-
-        #p_h = min(p_h, self.max_patch_h)
-        #p_w = min(p_w, self.max_patch_w)
+#        ar = h/w
+#
+#        if p_h > self.max_patch_h:
+#            p_h = self.max_patch_h
+#            p_w = int(p_h / ar)
+#        if p_w > self.max_patch_w:
+#            p_w = self.max_patch_w
+#            p_h = int(ar * p_w)
+#
+#        p_h = min(p_h, self.max_patch_h)
+#        p_w = min(p_w, self.max_patch_w)
+        p_h = max(p_h, 1)
+        p_w = max(p_w, 1)
 
         # crop height and crop width
         c_h = p_h * self.patch_size
@@ -302,8 +304,6 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         assert c_w <= w
         assert c_h >= self.patch_size
         assert c_w >= self.patch_size
-        assert c_h <= self.patch_size * self.max_patch_h
-        assert c_w <= self.patch_size * self.max_patch_w
 
         return c_h, c_w
 
@@ -334,12 +334,25 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
 
         ph, pw = h//self.patch_size, w//self.patch_size
 
+        # patches x into a list of patches
+        x = rearrange(x, "c (h p1) (w p2) -> (h w) c (p1 p2)", p1=self.patch_size, p2=self.patch_size, c = self.channels)
+
         h_indices, w_indices = torch.meshgrid(torch.arange(ph, device=x.device), torch.arange(pw, device=x.device), indexing='ij')
 
-        # distances from upper left corner
-        tri_distances = (h_indices + w_indices) * 1.0
 
-        _, indices_flat = tri_distances.view(-1).sort()
+        # makes it so that ph and pw that are out of bounds can't be selected
+        _mask = torch.logical_and(h_indices < self.max_patch_h, w_indices < self.max_patch_w)
+        x = x[_mask.flatten()]
+
+        h_indices = h_indices[_mask]
+        w_indices = w_indices[_mask]
+
+        # s c
+        mags = x.abs().amax(-1)
+
+        # sorts by magnitude
+        _, per_channel_sorted_idx = mags.sort(dim=0, descending=True)
+
 
         # k is the full length of dct patches needed to fully (losslessly)
         # represent x
@@ -350,8 +363,7 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
 
         # also if sample_patches_beta is set, then k will be sampled from the
         # exponential distribution
-        k = len(indices_flat)
-
+        k = ph * pw
         k = min(k, self.max_patch_h * self.max_patch_w)
         k = min(k, self.max_seq_len)
 
@@ -361,16 +373,13 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
             # at least the base channels are needed
             k = max(c, k)
 
-        indices_flat = indices_flat[:k]
-
-        # patches x into a list of patches
-        x = rearrange(x, "c (h p1) (w p2) -> (h w) c (p1 p2)", p1=self.patch_size, p2=self.patch_size, c = self.channels)
-
         # now splits up the k patches between the channels
         # each channel gets it's own patches
         channel_k = (self.channel_importances * k).round().long()
         # there should be at least one patch per channel
         channel_k = channel_k.clamp(1)
+
+        # handles the remainder
         _total_channel_k = channel_k.sum()
         channel_k[0] = channel_k[0] - (_total_channel_k - k)
         assert channel_k.sum() == k
@@ -383,7 +392,8 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         positions_h = []
         positions_w = []
         for i in range(c):
-            ind = indices_flat[:channel_k[i].item()]
+            ind = per_channel_sorted_idx[:channel_k[i].item(), i]
+
             x_c = x[ind, i, :]
             x_out.append(x_c)
             channels.append(
@@ -406,10 +416,6 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
 
         # shape k, z
         x_out = torch.concat(x_out, dim=0)
-
-        h_indices = h_indices.flatten()[indices_flat]
-        w_indices = w_indices.flatten()[indices_flat]
-
 
         s, z = x_out.shape
         assert z == self.patch_size ** 2, f"{z} != {self.patch_size ** 2}"

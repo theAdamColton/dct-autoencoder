@@ -177,9 +177,13 @@ class DCTAutoencoder(PreTrainedModel):
 
         if return_loss:
             rec_loss = F.mse_loss(dct_patches.patches[mask],input_patches[mask])
+            zz_mask = torch.logical_and(dct_patches.w_indices == 0, dct_patches.h_indices == 0)
+            zz_mask = mask & zz_mask
+            zz_loss = F.mse_loss(dct_patches.patches[zz_mask], input_patches[zz_mask])
 
         else:
             rec_loss = 0.0
+            zz_loss = 0.0
 
         return dict(
             dct_patches=dct_patches,
@@ -187,4 +191,5 @@ class DCTAutoencoder(PreTrainedModel):
             commit_loss=vq_loss,
             codes=codes,
             rec_loss=rec_loss,
+            zz_loss =zz_loss,
         )
