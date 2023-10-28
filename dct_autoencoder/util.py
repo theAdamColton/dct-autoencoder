@@ -8,11 +8,72 @@ import random
 import math
 from PIL import ImageDraw
 from PIL import ImageFont
+from einops import einsum
+
+
+#https://ixora.io/projects/colorblindness/color-blindness-simulation-research/
+
+# sRGB -> XYZ D65
+MsRGB = torch.Tensor([[0.4124564, 0.3575761, 0.1804375],
+                  [0.2126729, 0.7151522, 0.0721750],
+                  [0.0193339, 0.1191920, 0.9503041]])
+# XYZ D65 -> LMS
+MHPE = torch.Tensor([[ 0.4002, 0.7076, -0.0807],
+                 [-0.2280, 1.1500,  0.0612],
+                 [      0,      0,  0.9184]])
+
+# LMS -> ipt
+Mipt = torch.Tensor([[0.4, 0.4, 0.2],
+                     [4.455, -4.851, 0.3960],
+                     [0.8056, .3572, -1.1628]])
+Trgb2lms = MHPE @ MsRGB
+Tlms2rgb = Trgb2lms.inverse()
+
 
 def add_txt_to_pil_image(image, text):
     imd = ImageDraw.Draw(image)
     font = ImageFont.truetype('FreeMono.ttf', 48)
     imd.text((5, 5), text, font=font, fill =(255, 255, 255))
+
+
+def rgb_to_lms(x:torch.Tensor):
+    return einsum(
+            Trgb2lms.to(x.dtype).to(x.device),
+            x,
+            'c c, ... c h w -> ... c h w')
+
+
+def lms_to_rgb(x:torch.Tensor):
+    return einsum(Tlms2rgb.to(x.dtype).to(x.device),
+                x,
+                  'c c, ... c h w -> ... c h w')
+    
+def rgb_to_ipt(x:torch.Tensor):
+    """
+    page 147
+    https://scholarworks.rit.edu/theses/2858/
+    """
+    x = rgb_to_lms(x)
+    mask = x >= 0.0
+    x[mask] = x[mask] ** 0.43
+    x[~mask] = -1 * (-1 * x[~mask] ) ** 0.43
+    return einsum(Mipt.to(x.dtype).to(x.device),
+                  x,
+                  'c c, ... c h w -> ... c h w')
+
+def ipt_to_rgb(x: torch.Tensor):
+    """
+    page 147
+    https://scholarworks.rit.edu/theses/2858/
+    """
+    x = einsum(Mipt.inverse().to(x.dtype).to(x.device),
+                  x,
+                  'c c, ... c h w -> ... c h w')
+    mask = x >= 0.0
+    x[mask] = x[mask] ** 2.3256
+    x[~mask] = -1 * (-1 * x[~mask] ) ** 2.3256
+    return lms_to_rgb(x)
+
 
 def rgb_to_ycbcr(x:torch.Tensor):
     """

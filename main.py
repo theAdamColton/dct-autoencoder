@@ -15,7 +15,7 @@ import random
 
 from dct_autoencoder.feature_extraction_dct_autoencoder import DCTAutoencoderFeatureExtractor
 from dct_autoencoder.patchnorm import PatchNorm
-from dct_autoencoder.util import power_of_two
+from dct_autoencoder.util import power_of_two, calculate_perplexity
 from dct_autoencoder.dct_patches import DCTPatches, slice_dctpatches
 from dct_autoencoder.modeling_dct_autoencoder import DCTAutoencoder
 from dct_autoencoder.configuration_dct_autoencoder import DCTAutoencoderConfig
@@ -91,6 +91,26 @@ def make_image_grid(x, x_hat, filename=None, n: int = 10, max_size: int = 1024):
 
     return im
 
+def get_loss_weight_in_patch(h,w,decay:float,device,dtype, eps=1e-2):
+    _arange_h = torch.arange(h, device=device, dtype=dtype)
+    _arange_w = torch.arange(w, device=device, dtype=dtype)
+    _h_ind, _w_ind = torch.meshgrid(_arange_h, _arange_w, indexing='ij')
+    in_patch_dist = _h_ind + _w_ind
+    # exponential decay
+    weight= torch.exp(-decay * in_patch_dist) + eps
+    return weight
+
+def get_loss_weight_between_patches(h_positions, w_positions, decay, eps=1e-2):
+    weight = h_positions + w_positions
+    # exponential decay
+    weight = torch.exp(-decay * weight) + eps
+    return weight
+
+def weighted_mse_loss(x,y,patch_pixel_weights,patch_position_weights):
+    loss = (x-y)**2
+    loss = (loss* patch_pixel_weights.unsqueeze(0)).mean()
+    loss = (loss * patch_position_weights).mean()
+    return loss
 
 def train_step(
            batch: DCTPatches,
@@ -98,33 +118,72 @@ def train_step(
            proc: DCTAutoencoderFeatureExtractor,
            max_batch_n = None,
            decode_pixels=False,
-           return_loss=True,
+           patch_pixel_decay_alpha=0.05,
+           patch_position_decay_alpha=0.1,
            ):
     if max_batch_n is not None:
         batch = slice_dctpatches(batch, max_batch_n)[0]
 
+    # the batch is normalized
     batch = autoencoder._normalize(batch)
 
+    # input patches are saved
     input_patches = batch.patches
     
-    res = autoencoder(batch, return_loss)
+    # runs the autoencoder
+    res = autoencoder(batch, )
 
     output_patches = res['dct_patches']
+
+    # gets the mask, 1s where the sequences wasn't padded
+    mask = ~output_patches.key_pad_mask
+
+    # loss weights
+#    patch_pixel_weights = get_loss_weight_in_patch(
+#            autoencoder.config.patch_size,
+#           autoencoder.config.patch_size,
+#           patch_pixel_decay_alpha,
+#           autoencoder.device,
+#           autoencoder.dtype,
+#       )
+#    patch_position_weights = get_loss_weight_between_patches(
+#            output_patches.h_indices,
+#            output_patches.w_indices,
+#            patch_position_decay_alpha,
+#    )
+
+    # normalized loss
+    res['rec_loss'] = F.mse_loss(output_patches.patches[mask], input_patches[mask])
+
+    # mse loss between unnormalized features
+    _var = autoencoder.patchnorm.var[output_patches.patch_channels,output_patches.h_indices,output_patches.w_indices][mask]
+    res['rec_loss_unnormalized'] = (_var * (output_patches.patches[mask] - input_patches[mask]) ** 2).sum().sqrt() / _var.nelement()
+
+#    res['rec_loss'] = weighted_mse_loss(output_patches.patches[mask],
+#                          input_patches[mask],
+#                         patch_pixel_weights.flatten(),
+#                          patch_position_weights[mask])
+
+
+    with torch.no_grad():
+        res['perplexity'] = calculate_perplexity(res['codes'][mask], autoencoder.config.vq_codebook_size)
 
     if decode_pixels:
         # inverse normalization for output_patches
         output_patches.patches = autoencoder.patchnorm.inverse_norm(output_patches.patches, output_patches.patch_channels, output_patches.h_indices, output_patches.w_indices)
-        images_hat = proc.postprocess(output_patches)
-
 
         # inverse normalization for input patches
         input_patches = autoencoder.patchnorm.inverse_norm(input_patches, output_patches.patch_channels, output_patches.h_indices, output_patches.w_indices)
+
+        # un-patchifies the patches, and converts from dct to pixels
+        images_hat = proc.postprocess(output_patches)
         output_patches.patches = input_patches
         images = proc.postprocess(output_patches)
 
         pixel_loss = 0.0
 
         for im, im_hat in zip(images, images_hat):
+            # rgb space pixel loss
             pixel_loss += F.mse_loss(im, im_hat)
 
         pixel_loss = pixel_loss / len(images_hat)
@@ -203,6 +262,8 @@ def train(
     save_every=1000,
     use_pixel_loss=False,
     loss_weight={},
+   patch_pixel_decay_alpha=0.05,
+   patch_position_decay_alpha=0.1,
 ):
     if optimizer is None:
         optimizer = torch.optim.Adam(autoencoder.parameters(), lr=1e-9)
@@ -234,7 +295,10 @@ def train(
                 print("logging images ....")
                 autoencoder.eval()
                 with torch.no_grad():
-                    out = train_step(batch, autoencoder, proc, max_batch_n=n_log, decode_pixels=True, return_loss=False)
+                    out = train_step(batch, autoencoder, proc, max_batch_n=n_log, decode_pixels=True,
+                               patch_pixel_decay_alpha=patch_pixel_decay_alpha,
+                               patch_position_decay_alpha=patch_position_decay_alpha,
+                                     )
                 autoencoder.train()
                 image = make_image_grid(
                     out["x"], out["x_hat"], filename=f"{OUTDIR}/train image {i:04}.png", n=n_log
@@ -386,6 +450,8 @@ def main(
     max_iters_pixel_loss: int =  5000,
     batch_size_pixel_loss: int = 8,
     seed: int=42,
+    patch_pixel_decay_alpha:float=0.05,
+    patch_position_decay_alpha:float=0.1,
 ):
     model_config = DCTAutoencoderConfig.from_json_file(model_config_path)
 
@@ -452,6 +518,8 @@ def main(
         feature_dim=model_config.feature_dim,
         n_attention_heads = model_config.n_attention_heads,
         patch_size=model_config.patch_size,
+        patch_pixel_decay_alpha=patch_pixel_decay_alpha,
+        patch_position_decay_alpha=patch_position_decay_alpha,
         **loss_weight,
     )
 
@@ -493,6 +561,8 @@ def main(
             rng=rng,
             loss_weight=loss_weight,
             optimizer=optimizer,
+            patch_pixel_decay_alpha=patch_pixel_decay_alpha,
+            patch_position_decay_alpha=patch_position_decay_alpha,
         )
 
     # this trains using longer sequence lengths and a smaller batch size
@@ -519,6 +589,8 @@ def main(
             vq_callables=vq_callables,
             rng=rng,
             loss_weight=loss_weight,
+            patch_pixel_decay_alpha=patch_pixel_decay_alpha,
+            patch_position_decay_alpha=patch_position_decay_alpha,
         )
 
     # this trains using long sequence lengths as well as pixel loss
@@ -542,6 +614,8 @@ def main(
             rng=rng,
             loss_weight=loss_weight,
             use_pixel_loss=True,
+            patch_pixel_decay_alpha=patch_pixel_decay_alpha,
+            patch_position_decay_alpha=patch_position_decay_alpha,
         )
 
 

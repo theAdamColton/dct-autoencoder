@@ -40,7 +40,7 @@ class PatchNorm(nn.Module):
         max_patch_w: int,
         patch_res: int,
         channels: int,
-        eps: float = 1e-6,
+        eps: float = 1e-1,
     ):
         super().__init__()
         self.eps = eps

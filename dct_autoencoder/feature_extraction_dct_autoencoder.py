@@ -14,8 +14,10 @@ v
 image of dct patches Shape: (ph, pw, pz), where pz = (c * patchsize ** 2)
 
 | distance threshold, 
-| take the top p closest patches
-| to the top left corner
+| take the top p closest patches to the top left corner, mixed with the top
+| magnitude frequencies
+| These positions need to be in-bounds with respect to the model's max patch h
+| and max patch w.
 v
 
 flattened image Shape: (s, pz) where s = int(ph * pw * p)
@@ -82,8 +84,8 @@ from .util import (
     exp_dist,
     idct2,
     pad_sequence,
-    rgb_to_ycbcr,
-    ycbcr_to_rgb,
+    ipt_to_rgb,
+    rgb_to_ipt,
 )
 
 
@@ -106,7 +108,7 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         max_patch_h: int,
         max_patch_w: int,
         max_seq_len: int,
-        channel_importances:Tuple[float,float,float] = (4,1,1),
+        channel_importances:Tuple[float,float,float] = (1,1,1),
     ):
         self.channels = channels
         self.patch_size = patch_size
@@ -124,14 +126,14 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         x is a image tensor containing rgb colors, with values between 0.0
         and 1.0
         """
-        x = rgb_to_ycbcr(x)
+        x = rgb_to_ipt(x)
         og_dtype = x.dtype
         return dct2(x.to(torch.float32), 'ortho').to(og_dtype)
 
     def _transform_image_out(self, x):
         og_dtype = x.dtype
         image = idct2(x.to(torch.float32), 'ortho').to(og_dtype)
-        image = ycbcr_to_rgb(image)
+        image = ipt_to_rgb(image)
         return image
             
 
@@ -347,7 +349,8 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         mags = x.abs().amax(-1)
 
         # distances from upper left corner
-        distances = ((h_indices + w_indices) * - 0.1).flatten()
+        distance_weight = 0.5
+        distances = ((h_indices + w_indices) * - distance_weight).flatten()
 
         # sorts by magnitude and distance
         _, per_channel_sorted_idx = (mags + distances.unsqueeze(-1)).sort(dim=0, descending=True)

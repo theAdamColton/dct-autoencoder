@@ -8,9 +8,6 @@ from transformers import PreTrainedModel
 
 from dct_autoencoder.patchnorm import PatchNorm
 from .configuration_dct_autoencoder import DCTAutoencoderConfig
-from .util import (
-    calculate_perplexity,
-)
 from .dct_patches import DCTPatches
 
 class DCTAutoencoder(PreTrainedModel):
@@ -56,11 +53,18 @@ class DCTAutoencoder(PreTrainedModel):
                 ff_no_bias = True,
                 sandwich_norm = True,
             )
+        
+        self.vq_norm = nn.Sequential(
+#                nn.LayerNorm(config.feature_dim),
+#                nn.GELU(),
+                 nn.Identity(),
+            )
 
         self.vq_model = LFQ(
                 dim = config.feature_dim,
                 num_codebooks=config.vq_num_codebooks,
                 codebook_size=config.vq_codebook_size,
+                straight_through_activation=nn.Tanh(),
                 )
 
         self.decoder = Encoder(
@@ -128,6 +132,7 @@ class DCTAutoencoder(PreTrainedModel):
         # X-Transformers uses ~attn_mask
         dct_patches.patches = self.encoder(dct_patches.patches, attn_mask=~dct_patches.attn_mask)
 
+        dct_patches.patches = self.vq_norm(dct_patches.patches)
         dct_patches.patches, codes, vq_loss = self.vq_model(dct_patches.patches)
 
         return dct_patches, codes, vq_loss
@@ -157,39 +162,13 @@ class DCTAutoencoder(PreTrainedModel):
         self,
         # expects normalized dct patches
         dct_patches: DCTPatches,
-        return_loss: bool = True,
     ):
-        if return_loss:
-            # stores the input features for the loss calculation later
-            input_patches = dct_patches.patches
-
         dct_patches, codes, vq_loss = self.encode(dct_patches, do_normalize=False)
-
-        mask = ~dct_patches.key_pad_mask
-
-        if return_loss:
-            with torch.no_grad():
-                perplexity = calculate_perplexity(codes[mask], self.config.vq_codebook_size)
-        else:
-            perplexity = 0.0
 
         dct_patches = self.decode(dct_patches)
 
-        if return_loss:
-            rec_loss = F.mse_loss(dct_patches.patches[mask],input_patches[mask])
-            zz_mask = torch.logical_and(dct_patches.w_indices == 0, dct_patches.h_indices == 0)
-            zz_mask = mask & zz_mask
-            zz_loss = F.mse_loss(dct_patches.patches[zz_mask][..., 0], input_patches[zz_mask][..., 0])
-
-        else:
-            rec_loss = 0.0
-            zz_loss = 0.0
-
         return dict(
             dct_patches=dct_patches,
-            perplexity=perplexity,
             commit_loss=vq_loss,
             codes=codes,
-            rec_loss=rec_loss,
-            zz_loss =zz_loss,
         )
