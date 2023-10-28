@@ -17,6 +17,9 @@ from einops import einsum
 MsRGB = torch.Tensor([[0.4124564, 0.3575761, 0.1804375],
                   [0.2126729, 0.7151522, 0.0721750],
                   [0.0193339, 0.1191920, 0.9503041]])
+#MsRGB = torch.Tensor([[.4360747, .3850649, .1430804],
+#                  [0.2225045, 0.7168786, 0.0606169],
+#                  [0.0139322, 0.0971045, 0.7141733]])
 # XYZ D65 -> LMS
 MHPE = torch.Tensor([[ 0.4002, 0.7076, -0.0807],
                  [-0.2280, 1.1500,  0.0612],
@@ -30,6 +33,15 @@ Trgb2lms = MHPE @ MsRGB
 Tlms2rgb = Trgb2lms.inverse()
 
 
+def channel_mult(M, x):
+    shape = x.shape
+#    return (M @ x.view(3, -1)).view(*shape)
+    return einsum(
+            M,
+            x,
+            'i j, ... j h w -> ... i h w')
+
+
 def add_txt_to_pil_image(image, text):
     imd = ImageDraw.Draw(image)
     font = ImageFont.truetype('FreeMono.ttf', 48)
@@ -37,16 +49,14 @@ def add_txt_to_pil_image(image, text):
 
 
 def rgb_to_lms(x:torch.Tensor):
-    return einsum(
+    return channel_mult(
             Trgb2lms.to(x.dtype).to(x.device),
-            x,
-            'c c, ... c h w -> ... c h w')
+            x,)
 
 
 def lms_to_rgb(x:torch.Tensor):
-    return einsum(Tlms2rgb.to(x.dtype).to(x.device),
-                x,
-                  'c c, ... c h w -> ... c h w')
+    return channel_mult(Tlms2rgb.to(x.dtype).to(x.device),
+                x,)
     
 def rgb_to_ipt(x:torch.Tensor):
     """
@@ -57,18 +67,16 @@ def rgb_to_ipt(x:torch.Tensor):
     mask = x >= 0.0
     x[mask] = x[mask] ** 0.43
     x[~mask] = -1 * (-1 * x[~mask] ) ** 0.43
-    return einsum(Mipt.to(x.dtype).to(x.device),
-                  x,
-                  'c c, ... c h w -> ... c h w')
+    return channel_mult(Mipt.to(x.dtype).to(x.device),
+                  x,)
 
 def ipt_to_rgb(x: torch.Tensor):
     """
     page 147
     https://scholarworks.rit.edu/theses/2858/
     """
-    x = einsum(Mipt.inverse().to(x.dtype).to(x.device),
-                  x,
-                  'c c, ... c h w -> ... c h w')
+    x = channel_mult(Mipt.inverse().to(x.dtype).to(x.device),
+                  x,)
     mask = x >= 0.0
     x[mask] = x[mask] ** 2.3256
     x[~mask] = -1 * (-1 * x[~mask] ) ** 2.3256
