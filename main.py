@@ -157,7 +157,7 @@ def train_step(
 
     # mse loss between unnormalized features
     _var = autoencoder.patchnorm.var[output_patches.patch_channels,output_patches.h_indices,output_patches.w_indices][mask]
-    res['rec_loss_unnormalized'] = (_var * (output_patches.patches[mask] - input_patches[mask]) ** 2).sum().sqrt() / _var.nelement()
+    res['rec_loss_unnormalized'] = (_var * (output_patches.patches[mask] - input_patches[mask]) ** 2).sum() / _var.nelement()
 
 #    res['rec_loss'] = weighted_mse_loss(output_patches.patches[mask],
 #                          input_patches[mask],
@@ -247,11 +247,11 @@ def train(
     train_ds,
     optimizer=None,
     batch_size: int = 32,
-    learning_rate=3e-3,
+    learning_rate=3e-4,
     epochs: int = 1,
     device="cuda",
     dtype=torch.bfloat16,
-    log_every=50,
+    log_every=200,
     n_log: int = 10,
     max_steps:int=1000000,
     num_workers:int=0,
@@ -507,6 +507,7 @@ def main(
         max_seq_len=max_seq_len,
         max_seq_len_ft = max_seq_len_ft,
         learning_rate=learning_rate,
+        learning_rate_ft=learning_rate_ft,
         commitment_loss_weight_start=commitment_loss_weight_start,
         commitment_loss_weight_end=commitment_loss_weight_end,
         commitment_loss_weight_n=commitment_loss_weight_n,
@@ -531,6 +532,10 @@ def main(
 
     # ----------- Norm Training ---------------
     if train_norm_iters > 0:
+        # resets the norm
+        if resume_path is not None:
+            autoencoder.patchnorm = PatchNorm(autoencoder.config.max_patch_h, autoencoder.config.max_patch_w, autoencoder.config.patch_size, autoencoder.config.image_channels)
+
         print("training norm")
         processor.sample_patches_beta = 0.0
         processor.max_seq_len = model_config.max_patch_h * model_config.max_patch_w * 3

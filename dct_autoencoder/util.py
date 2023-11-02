@@ -34,8 +34,6 @@ Tlms2rgb = Trgb2lms.inverse()
 
 
 def channel_mult(M, x):
-    shape = x.shape
-#    return (M @ x.view(3, -1)).view(*shape)
     return einsum(
             M,
             x,

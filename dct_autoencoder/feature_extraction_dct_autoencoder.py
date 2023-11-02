@@ -108,7 +108,7 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         max_patch_h: int,
         max_patch_w: int,
         max_seq_len: int,
-        channel_importances:Tuple[float,float,float] = (1,1,1),
+        channel_importances:Tuple[float,float,float] = (8,1,1),
     ):
         self.channels = channels
         self.patch_size = patch_size
