@@ -127,9 +127,9 @@ def train_step(
     # l1 is used because dct features are usually considered laplacian distributed
     res['rec_loss'] = F.l1_loss(output_patches.patches[mask], batch.patches[mask])
 
-    # mse loss between unnormalized features
-    _var = autoencoder.patchnorm.var[output_patches.patch_channels,output_patches.h_indices,output_patches.w_indices][mask]
-    res['rec_loss_unnormalized'] = (_var * (output_patches.patches[mask] - batch.patches[mask]) ** 2).sum() / _var.nelement()
+    # l1 loss between unnormalized features
+    _b = autoencoder.patchnorm.b[output_patches.patch_channels,output_patches.h_indices,output_patches.w_indices][mask]
+    res['rec_loss_unnormalized'] = (_b * (output_patches.patches[mask] - batch.patches[mask])).abs().sum() / _b.nelement()
 
     with torch.no_grad():
         res['perplexity'] = calculate_perplexity(res['codes'][mask], autoencoder.config.vq_codebook_size)
@@ -137,8 +137,7 @@ def train_step(
     if decode_pixels:
         # inverse normalization for input patches
         batch = autoencoder._inv_normalize(batch)
-
-        # inverse normalization for input patches
+        # inverse normalization for output patches
         output_patches = autoencoder._inv_normalize(output_patches)
 
         # un-patchifies the patches, and converts from dct to pixels
