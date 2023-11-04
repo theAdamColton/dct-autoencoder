@@ -1,4 +1,4 @@
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Optional
 from tqdm import tqdm
 import torch
 import webdataset as wds
@@ -12,7 +12,7 @@ import time
 import json
 import wandb
 import random
-import matplotlib.pyplot as plt
+
 
 from dct_autoencoder.feature_extraction_dct_autoencoder import DCTAutoencoderFeatureExtractor
 from dct_autoencoder.patchnorm import PatchNorm
@@ -20,7 +20,6 @@ from dct_autoencoder.util import power_of_two, calculate_perplexity, tuple_colla
 from dct_autoencoder.dct_patches import DCTPatches, slice_dctpatches
 from dct_autoencoder.modeling_dct_autoencoder import DCTAutoencoder
 from dct_autoencoder.configuration_dct_autoencoder import DCTAutoencoderConfig
-from dct_autoencoder.util import imshow
 
 
 import resource
@@ -200,9 +199,6 @@ def __set_lr(
         ):
     for g in optimizer.param_groups:
         g["lr"] = lr
-
-
-
 
 def train(
     autoencoder: DCTAutoencoder,
@@ -404,6 +400,7 @@ def main(
     max_iters_pixel_loss: int =  5000,
     batch_size_pixel_loss: int = 8,
     seed: int=42,
+    log_every: int = 200,
 ):
     model_config = DCTAutoencoderConfig.from_json_file(model_config_path)
 
@@ -516,6 +513,7 @@ def main(
             rng=rng,
             loss_weight=loss_weight,
             optimizer=optimizer,
+            log_every=log_every,
         )
 
     # this trains using longer sequence lengths and a smaller batch size
@@ -542,6 +540,7 @@ def main(
             vq_callables=vq_callables,
             rng=rng,
             loss_weight=loss_weight,
+            log_every=log_every,
         )
 
     # this trains using long sequence lengths as well as pixel loss
@@ -565,6 +564,7 @@ def main(
             rng=rng,
             loss_weight=loss_weight,
             use_pixel_loss=True,
+            log_every=log_every,
         )
 
 

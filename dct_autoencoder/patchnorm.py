@@ -43,6 +43,8 @@ class PatchNorm(nn.Module):
         patch_size: int,
         channels: int,
         eps: float = 1e-6,
+        max_val: float = 5.0,
+        min_val: float = -5.0,
     ):
         super().__init__()
         self.eps = eps
@@ -67,6 +69,9 @@ class PatchNorm(nn.Module):
         )
 
         self.frozen = False
+
+        self.max_val = max_val
+        self.min_val = min_val
 
     @property
     def var(self):
@@ -127,6 +132,8 @@ class PatchNorm(nn.Module):
         patches = (patches - self.mean[pos_channels, pos_h, pos_w]) / (
             self.std[pos_channels, pos_h, pos_w] + self.eps
         )
+        
+        patches.clamp_(self.min_val, self.max_val)
 
         out = torch.zeros(patches_shape, dtype=patches.dtype, device=patches.device)
         out[~key_pad_mask] = patches

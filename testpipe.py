@@ -17,12 +17,12 @@ images = [
     for image_file in image_files
         ]
 images = [
-        torchvision.transforms.Resize((512, 512))(image).to(device)
+        image.to(device)
         for image in images]
 
 max_patch_h=16
 max_patch_w=16
-patch_size = 16
+patch_size=16
 
 proc = DCTAutoencoderFeatureExtractor(
         channels=3,
@@ -53,9 +53,13 @@ patchnorm(batch)
 batch.patches = patchnorm(batch)
 print("std", batch.patches.std(dim=0).mean())
 print("mean", batch.patches.mean())
+print("max", batch.patches.max())
+print("min", batch.patches.min())
 batch.patches = patchnorm.inverse_norm(batch)
 
 image = proc.postprocess(batch)[0]
+
+print('original size', batch.original_sizes[0])
 
 imshow(image)
 plt.savefig("junk.png")
