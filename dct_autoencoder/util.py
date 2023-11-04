@@ -344,6 +344,7 @@ def imshow(x: torch.Tensor, ax=None):
     if ax is None:
         ax = plt
         ax.imshow(x)
+        ax.axis('off')
         plt.show()
     else:
         ax.axis("off")

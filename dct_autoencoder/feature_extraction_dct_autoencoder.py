@@ -375,7 +375,6 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
             k = min(round(exp_trunc_dist(self.sample_patches_beta)), k)
             k = max(1, k)
 
-        k = min(k, self.max_patch_h * self.max_patch_w)
         k = min(k, self.max_seq_len)
 
         masked_idx = sorted_idx[:k]
