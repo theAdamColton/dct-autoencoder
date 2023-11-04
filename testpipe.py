@@ -27,11 +27,12 @@ patch_size=16
 proc = DCTAutoencoderFeatureExtractor(
         channels=3,
         patch_size=patch_size,
-        sample_patches_beta=0.0005,
+        sample_patches_beta=0.01,
         max_patch_h=max_patch_h,
         max_patch_w=max_patch_w,
         max_seq_len=256,
-        channel_importances=(8,1,1),
+        channel_importances=(12,1,1),
+        patch_sample_magnitude_weight=0.0,
 )
 
 patchnorm = PatchNorm(
@@ -48,6 +49,7 @@ res = tuple_collate(preprocessed)
 
 batch:DCTPatches = next(iter(proc.iter_batches(iter([res]), batch_size=None)))
 
+print("number of patches for image 0:", (batch.batched_image_ids[0][~batch.key_pad_mask[0]] == 0).sum().item())
 
 patchnorm(batch)
 batch.patches = patchnorm(batch)

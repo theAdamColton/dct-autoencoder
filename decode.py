@@ -11,10 +11,11 @@ from PIL import ImageDraw
 from torch_dct import dct_2d, idct_2d
 from dct_autoencoder.dct_patches import DCTPatches
 from dct_autoencoder import DCTAutoencoder, DCTAutoencoderFeatureExtractor
+from dct_autoencoder.util import tuple_collate
 torch.set_grad_enabled(False)
 
 
-def main(model_path: str, device="cuda", dtype=torch.bfloat16, image_path:str="images/bold.jpg"):
+def main(model_path: str, device="cuda", dtype=torch.bfloat16, image_path:str="images/holygrail.jpg"):
     image = torchvision.io.read_image(image_path) / 255
     c, h, w = image.shape
     ar = h / w
@@ -24,95 +25,61 @@ def main(model_path: str, device="cuda", dtype=torch.bfloat16, image_path:str="i
     else:
         h = min(512, h)
         w = int(h / ar)
+
     image = torchvision.transforms.Resize((h, w))(image)
-    image_dct = dct_2d(image, "ortho")
+
     image = image.to(dtype).to(device)
-    c, h, w = image.shape
+    _, h, w = image.shape
 
     autoenc = DCTAutoencoder.from_pretrained(model_path).to(device).to(dtype).eval()
     proc = DCTAutoencoderFeatureExtractor(
         channels=autoenc.config.image_channels,
         patch_size=autoenc.config.patch_size,
         sample_patches_beta=0.0,
-        max_n_patches=autoenc.config.max_n_patches,
+        max_patch_h=autoenc.config.max_patch_h,
+        max_patch_w=autoenc.config.max_patch_w,
         max_seq_len=autoenc.config.max_n_patches,
     )
 
-    input_data = proc.preprocess([image])
+    input_data = proc.preprocess(image)
+    input_data = tuple_collate([input_data])
 
     batch = next(iter(proc.iter_batches(iter([input_data]))))
     batch = batch.to(device)
 
-    #encoded_dct_patches, _, _ = autoenc.encode(batch, do_normalize=False)
-
-    distances = (
-        batch.patch_positions[0, :, 0] + batch.patch_positions[0, :, 1]
-    ) * 1.0
-    distances_i = distances.sort().indices
-
-    def inv_norm(p):
-        p.patches = autoenc.patchnorm.inverse_norm(
-                p.patches,
-                pos_h = p.patch_positions[...,0],
-                pos_w = p.patch_positions[...,1],
-                )
-        return p
-
+    res = autoenc(batch, do_normalize=True)
+    codes = res['codes']
+    dct_patches = res['dct_patches']
 
     def mask_and_rec(i: int):
         # mask all but i codes
-#        distances_i_mask = distances_i[:i]
-#        masked_dct_patches = DCTPatches(
-#            patches=encoded_dct_patches.patches[:, distances_i_mask],
-#            key_pad_mask=encoded_dct_patches.key_pad_mask[:, distances_i_mask],
-#            attn_mask=encoded_dct_patches.attn_mask[:,:, distances_i_mask][..., distances_i_mask],
-#            batched_image_ids=encoded_dct_patches.batched_image_ids[:, distances_i_mask],
-#            patch_positions=encoded_dct_patches.patch_positions[:, distances_i_mask],
-#            patch_sizes=encoded_dct_patches.patch_sizes,
-#            original_sizes=encoded_dct_patches.original_sizes,
-#        )
-        masked_batch = DCTPatches(
-                patches=batch.patches[:, :i].clone(),
-                key_pad_mask=batch.key_pad_mask[:, :i].clone(),
-                attn_mask=batch.attn_mask[:,:, :i,:][..., :i].clone(),
-                batched_image_ids=batch.batched_image_ids[:, :i].clone(),
-                patch_positions=batch.patch_positions[:, :i].clone(),
-            patch_sizes=batch.patch_sizes,
-            original_sizes=batch.original_sizes,
-        )
-        out = autoenc(masked_batch)
-        out_dct_patches = out['dct_patches']
-        out_dct_patches = inv_norm(out_dct_patches)
-        return out_dct_patches
+        codes_masked = codes[:,:i,:]
 
-    def _norm_image(x):
-        def norm_ip(img, low, high):
-            img.clamp_(min=low, max=high)
-            img.sub_(low).div_(max(high - low, 1e-5))
-            return img
-
-        q = 0.025
-        _min = x.quantile(q)
-        _max = x.quantile(1-q)
-
-        return norm_ip(x, float(_min), float(_max))
+        return autoenc.decode_from_codes(codes_masked, key_pad_mask=batch.key_pad_mask, 
+                                        attn_mask=batch.attn_mask,
+                                        batched_image_ids=batch.batched_image_ids,
+                                        patch_channels=batch.patch_channels,
+                                        patch_positions=batch.patch_positions,
+                                        patch_sizes = batch.patch_sizes,
+                                        original_sizes=batch.original_sizes,
+                                    )
 
     images = []
-    n = batch.patches.shape[1]
-    jmp = 32
+    n = min(batch.patches.shape[1], 10)
+    jmp = 1
     for i in tqdm(range(1, n+1, jmp)):
         masked_dct_patches = mask_and_rec(i)
 
+        _og_transform_out = proc._transform_image_out
         proc._transform_image_out = lambda x:x
+        # an image of the DCT features
         image_dct_masked = proc.postprocess(masked_dct_patches)[0].cpu()
-        proc._transform_image_out = lambda x: idct_2d(x.float(), 'ortho')
+        proc._transform_image_out = _og_transform_out
 
+        # an image with RGB pixels
         image_masked = proc.postprocess(masked_dct_patches)[0].cpu()
 
-        #image_masked = image_dct.clamp(0.0, 1.0)
-        #image_dct_masked = image_dct.clamp(0.0, 1.0)
-
-        masked_dct_patches.patches = batch.patches.clone()[:, distances_i[:i]]
+        masked_dct_patches.patches = batch.patches.clone()[:, :i, :]
         #masked_dct_patches = inv_norm(masked_dct_patches)
         image_original = proc.postprocess(masked_dct_patches)[0].cpu()
         image_original = _norm_image(image_original)

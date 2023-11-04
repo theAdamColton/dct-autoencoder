@@ -108,7 +108,9 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         max_patch_h: int,
         max_patch_w: int,
         max_seq_len: int,
-        channel_importances:Tuple[float,float,float] = (8,1,1),
+        channel_importances:Tuple[float,float,float] = (8.0,1.0,1.0),
+        # how import is the max magnitude of a patch when sampling which patches to drop
+        patch_sample_magnitude_weight: float= 0.5,
     ):
         self.channels = channels
         self.patch_size = patch_size
@@ -117,7 +119,7 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         self.max_patch_w = max_patch_w
         self.max_seq_len = max_seq_len
         self.channel_importances = torch.Tensor(channel_importances)
-        self.channel_importances = self.channel_importances / self.channel_importances.sum()
+        self.patch_sample_magnitude_weight = patch_sample_magnitude_weight
 
 
     @torch.no_grad()
@@ -324,37 +326,50 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         # patches x into a list of patches
         x = rearrange(x, "c (h p1) (w p2) -> (h w) c (p1 p2)", p1=self.patch_size, p2=self.patch_size, c = self.channels)
 
+        c_indices = torch.arange(c, device=x.device).unsqueeze(0)
+        # same number of (h w) as x
+        c_indices = c_indices.expand(x.shape[0], -1)
+
         h_indices, w_indices = torch.meshgrid(torch.arange(ph, device=x.device), torch.arange(pw, device=x.device), indexing='ij')
 
         # makes it so that ph and pw that are out of bounds can't be selected
-        _mask = torch.logical_and(h_indices < self.max_patch_h, w_indices < self.max_patch_w)
+        _mask = (h_indices < self.max_patch_h) & (w_indices < self.max_patch_w)
         x = x[_mask.flatten()]
+
+        c_indices = c_indices[_mask.flatten()]
 
         h_indices = h_indices[_mask]
         w_indices = w_indices[_mask]
 
-        # s c
+        # negative distances from upper left corner
+        # shape: s
+        pos_distances = -1 * (h_indices + w_indices).flatten()
+
+        # expands over channels
+        pos_distances = pos_distances.unsqueeze(-1).expand(-1, c)
+
+        # shape: s
         mags = x.abs().amax(-1)
+        mags = mags * self.patch_sample_magnitude_weight
 
-        # distances from upper left corner
-        distance_weight = 1.0
-        distances = ((h_indices + w_indices) * - distance_weight).flatten()
+        channel_importances = self.channel_importances.to(x.device)
 
-        # sorts by magnitude and distance
-        _, per_channel_sorted_idx = (mags + distances.unsqueeze(-1)).sort(dim=0, descending=True)
+        # sorts by importance scores
+        # shape: s, c
+        importance_scores = mags + pos_distances / channel_importances
+        # shape: s*c
+        _, sorted_idx = importance_scores.flatten().sort(dim=0, descending=True)
 
-
-        # k is the full length of dct patches needed to fully (losslessly)
-        # represent x
+        # k starts out as the full length of dct patches needed to fully
+        # (losslessly) represent x
 
         # k gets downsampled in two ways:
-        # k can't be larger than the max number of patches or the current max
-        # sequence length
+        # k can't be larger than the current max sequence length
 
-        # also if sample_patches_beta is set, then k will be sampled from the
-        # exponential distribution
+        # if sample_patches_beta is set, then k will be shrunk by sampling from
+        # the exponential distribution
 
-        k = distances.shape[0] * self.channels
+        k = len(sorted_idx)
         if self.sample_patches_beta > 0.00:
             # samples from the exponential distribution to get k
             k = min(round(exp_trunc_dist(self.sample_patches_beta)), k)
@@ -363,61 +378,22 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         k = min(k, self.max_patch_h * self.max_patch_w)
         k = min(k, self.max_seq_len)
 
-        # now splits up the k patches between the channels
-        # each channel gets it's own patches
-        channel_k = (self.channel_importances * k).round().long()
-        # there should be at least one patch per channel
-        # and there can't be more channel_k than there are patches to pick from
-        # handles the remainder
-        _total_channel_k = channel_k.sum()
-        channel_k[0] = channel_k[0] - (_total_channel_k - k)
-        assert channel_k.sum() <= self.max_seq_len, channel_k.sum()
+        masked_idx = sorted_idx[:k]
 
-        channel_k = channel_k.clamp(1, distances.shape[0])
+        sampled_h_indices = h_indices.unsqueeze(-1).expand(-1, c).flatten()[masked_idx]
+        sampled_w_indices = w_indices.unsqueeze(-1).expand(-1, c).flatten()[masked_idx]
 
-        h_indices_f = h_indices.reshape(-1)
-        w_indices_f = w_indices.reshape(-1)
+        pos = torch.stack([sampled_h_indices, sampled_w_indices], -1)
 
-        x_out = []
-        channels = []
-        positions_h = []
-        positions_w = []
-        for i in range(c):
-            assert per_channel_sorted_idx.shape[0] >= channel_k[i]
+        x = x.reshape(-1, self.patch_size**2)[masked_idx,:]
+        channels = c_indices.flatten()[masked_idx]
 
-            ind = per_channel_sorted_idx[:channel_k[i].item(), i]
-
-            x_c = x[ind, i, :]
-            assert x_c.shape[-1] == self.patch_size**2, x_c.shape
-            x_out.append(x_c)
-            channels.append(
-                    torch.Tensor([i] * channel_k[i])
-            )
-
-            positions_h.append(
-                    h_indices_f[ind]
-                    )
-            positions_w.append(
-                    w_indices_f[ind]
-                    )
-
-        channels = torch.concat(channels)
-        channels = channels.to(x.dtype).to(torch.long)
-
-        positions_h = torch.concat(positions_h)
-        positions_w = torch.concat(positions_w)
-        pos = torch.stack([positions_h, positions_w], dim=-1)
-
-        # shape k, z
-        x_out = torch.concat(x_out, dim=0)
-
-        s, z = x_out.shape
+        s, z = x.shape
         assert z == self.patch_size ** 2, f"{z} != {self.patch_size ** 2}"
         assert s <= self.max_seq_len
 
-
         # x is shape c, k
-        return x_out, pos, channels
+        return x, pos, channels
 
     @torch.no_grad()
     def _group_patches_by_max_seq_len(

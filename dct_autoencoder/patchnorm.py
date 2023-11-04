@@ -64,7 +64,7 @@ class PatchNorm(nn.Module):
         )
         # mean absolute deviation from the median
         self.b = nn.Parameter(
-            torch.zeros(channels, max_patch_h, max_patch_w, patch_size ** 2),
+            torch.ones(channels, max_patch_h, max_patch_w, patch_size ** 2),
             requires_grad=False,
         )
 
