@@ -124,7 +124,8 @@ def train_step(
     mask = ~output_patches.key_pad_mask
 
     # normalized loss
-    res['rec_loss'] = F.mse_loss(output_patches.patches[mask], batch.patches[mask])
+    # l1 is used because dct features are usually considered laplacian distributed
+    res['rec_loss'] = F.l1_loss(output_patches.patches[mask], batch.patches[mask])
 
     # mse loss between unnormalized features
     _var = autoencoder.patchnorm.var[output_patches.patch_channels,output_patches.h_indices,output_patches.w_indices][mask]
@@ -492,6 +493,8 @@ def main(
         processor.max_seq_len = max_seq_len 
         processor.sample_patches_beta = sample_patches_beta
         print("done training norm")
+    else:
+        autoencoder.patchnorm.frozen = True
 
     optimizer = torch.optim.Adam(autoencoder.parameters(), lr=1e-9)
 
