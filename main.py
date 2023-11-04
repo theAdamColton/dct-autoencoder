@@ -1,10 +1,10 @@
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple
 from tqdm import tqdm
 import torch
 import webdataset as wds
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
-import torchvision.transforms.v2 as transforms
+import torchvision.transforms as transforms
 import torchvision
 import os
 import math
@@ -12,13 +12,20 @@ import time
 import json
 import wandb
 import random
+import matplotlib.pyplot as plt
 
 from dct_autoencoder.feature_extraction_dct_autoencoder import DCTAutoencoderFeatureExtractor
 from dct_autoencoder.patchnorm import PatchNorm
-from dct_autoencoder.util import power_of_two, calculate_perplexity
+from dct_autoencoder.util import power_of_two, calculate_perplexity, tuple_collate
 from dct_autoencoder.dct_patches import DCTPatches, slice_dctpatches
 from dct_autoencoder.modeling_dct_autoencoder import DCTAutoencoder
 from dct_autoencoder.configuration_dct_autoencoder import DCTAutoencoderConfig
+from dct_autoencoder.util import imshow
+
+
+import resource
+rlimit = resource.getrlimit(resource.RLIMIT_NOFILE)
+resource.setrlimit(resource.RLIMIT_NOFILE, (2048, rlimit[1]))
 
 
 OUTDIR = f"out/{time.ctime()}/"
@@ -42,24 +49,6 @@ def get_decay_fn(start_val:float, end_value:float, n:int):
         return ((n-i) / n) * start_val + (i/n) * end_value
     return fn
 
-def get_collate_fn():
-    def collate(x: List[dict]):
-        patches = []
-        positions = []
-        original_sizes = []
-        patch_sizes = []
-        channels = []
-        for d in x:
-            patches.append(d["patches"])
-            positions.append(d["positions"])
-            original_sizes.append(d["original_sizes"])
-            patch_sizes.append(d["patch_sizes"])
-            channels.append(d['channels'])
-        return patches, positions, channels, original_sizes, patch_sizes
-
-    return collate
-
-
 def make_image_grid(x, x_hat, filename=None, n: int = 10, max_size: int = 1024):
     ims = []
 
@@ -71,8 +60,9 @@ def make_image_grid(x, x_hat, filename=None, n: int = 10, max_size: int = 1024):
         ims.append(im)
         ims.append(im_hat)
 
-    ims = [transforms.Resize(512, max_size=max_size)(im) for im in ims]
+    ims = [transforms.Resize(384, max_size=max_size, interpolation=transforms.InterpolationMode.BICUBIC)(im) for im in ims]
 
+    ims = [(im - im.min()) / (im.max() - im.min()) for im in ims]
     ims = [im.clamp(0.0, 1.0) for im in ims]
 
     sizes = [im.shape for im in ims]
@@ -81,9 +71,8 @@ def make_image_grid(x, x_hat, filename=None, n: int = 10, max_size: int = 1024):
 
     ims = [F.pad(im, (w - im.shape[2], 0, h - im.shape[1], 0)) for im in ims]
 
-
     im = torchvision.utils.make_grid(ims, 2, normalize=False, scale_each=False)
-    im = transforms.functional.to_pil_image(im.cpu().to(torch.float32))
+    im = transforms.functional.to_pil_image(im.cpu().float())
 
     if filename:
         im.save(filename)
@@ -118,67 +107,43 @@ def train_step(
            proc: DCTAutoencoderFeatureExtractor,
            max_batch_n = None,
            decode_pixels=False,
-           patch_pixel_decay_alpha=0.05,
-           patch_position_decay_alpha=0.1,
            ):
+    assert autoencoder.patchnorm.frozen
     if max_batch_n is not None:
         batch = slice_dctpatches(batch, max_batch_n)[0]
 
     # the batch is normalized
     batch = autoencoder._normalize(batch)
 
-    # input patches are saved
-    input_patches = batch.patches
-    
     # runs the autoencoder
-    res = autoencoder(batch, )
+    res = autoencoder(batch.shallow_copy())
+
 
     output_patches = res['dct_patches']
 
     # gets the mask, 1s where the sequences wasn't padded
     mask = ~output_patches.key_pad_mask
 
-    # loss weights
-#    patch_pixel_weights = get_loss_weight_in_patch(
-#            autoencoder.config.patch_size,
-#           autoencoder.config.patch_size,
-#           patch_pixel_decay_alpha,
-#           autoencoder.device,
-#           autoencoder.dtype,
-#       )
-#    patch_position_weights = get_loss_weight_between_patches(
-#            output_patches.h_indices,
-#            output_patches.w_indices,
-#            patch_position_decay_alpha,
-#    )
-
     # normalized loss
-    res['rec_loss'] = F.mse_loss(output_patches.patches[mask], input_patches[mask])
+    res['rec_loss'] = F.mse_loss(output_patches.patches[mask], batch.patches[mask])
 
     # mse loss between unnormalized features
     _var = autoencoder.patchnorm.var[output_patches.patch_channels,output_patches.h_indices,output_patches.w_indices][mask]
-    res['rec_loss_unnormalized'] = (_var * (output_patches.patches[mask] - input_patches[mask]) ** 2).sum() / _var.nelement()
-
-#    res['rec_loss'] = weighted_mse_loss(output_patches.patches[mask],
-#                          input_patches[mask],
-#                         patch_pixel_weights.flatten(),
-#                          patch_position_weights[mask])
-
+    res['rec_loss_unnormalized'] = (_var * (output_patches.patches[mask] - batch.patches[mask]) ** 2).sum() / _var.nelement()
 
     with torch.no_grad():
         res['perplexity'] = calculate_perplexity(res['codes'][mask], autoencoder.config.vq_codebook_size)
 
     if decode_pixels:
-        # inverse normalization for output_patches
-        output_patches.patches = autoencoder.patchnorm.inverse_norm(output_patches.patches, output_patches.patch_channels, output_patches.h_indices, output_patches.w_indices)
+        # inverse normalization for input patches
+        batch = autoencoder._inv_normalize(batch)
 
         # inverse normalization for input patches
-        input_patches = autoencoder.patchnorm.inverse_norm(input_patches, output_patches.patch_channels, output_patches.h_indices, output_patches.w_indices)
+        output_patches = autoencoder._inv_normalize(output_patches)
 
         # un-patchifies the patches, and converts from dct to pixels
         images_hat = proc.postprocess(output_patches)
-        output_patches.patches = input_patches
-        images = proc.postprocess(output_patches)
+        images = proc.postprocess(batch)
 
         pixel_loss = 0.0
 
@@ -209,7 +174,7 @@ def train_patch_norm(patch_norm: PatchNorm,
                ):
     train_ds = train_ds.shuffle(10000, rng=rng)
     dataloader = DataLoader(
-                train_ds, batch_size=batch_size, num_workers=0, collate_fn=get_collate_fn()
+                train_ds, batch_size=batch_size, num_workers=0, collate_fn=tuple_collate
             )
 
     patch_norm = patch_norm.to(torch.float32).to(device)
@@ -219,9 +184,7 @@ def train_patch_norm(patch_norm: PatchNorm,
             break
         batch = batch.to(device)
         batch.patches = batch.patches.to(torch.float32)
-        normalized_patches = patch_norm.forward(
-            batch.patches, batch.patch_channels, batch.h_indices, batch.w_indices, batch.key_pad_mask
-        )
+        normalized_patches = patch_norm.forward(batch)
         mean = normalized_patches[~batch.key_pad_mask].mean() .item()
         std = normalized_patches[~batch.key_pad_mask].std()   .item()
         _min = normalized_patches[~batch.key_pad_mask].min()  .item()
@@ -262,19 +225,15 @@ def train(
     save_every=1000,
     use_pixel_loss=False,
     loss_weight={},
-   patch_pixel_decay_alpha=0.05,
-   patch_position_decay_alpha=0.1,
 ):
     if optimizer is None:
         optimizer = torch.optim.Adam(autoencoder.parameters(), lr=1e-9)
-
-    collate_fn = get_collate_fn()
 
     # ----------- Model Training --------------
     for epoch_i, epoch in enumerate(range(epochs)):
         train_ds = train_ds.shuffle(10000, rng=rng)
         dataloader = DataLoader(
-            train_ds, batch_size=batch_size, num_workers=num_workers, collate_fn=collate_fn
+            train_ds, batch_size=batch_size, num_workers=num_workers, collate_fn=tuple_collate
         )
         # list of columns, or None
         for i, batch in enumerate(tqdm(proc.iter_batches(iter(dataloader), batch_size))):
@@ -296,8 +255,6 @@ def train(
                 autoencoder.eval()
                 with torch.no_grad():
                     out = train_step(batch, autoencoder, proc, max_batch_n=n_log, decode_pixels=True,
-                               patch_pixel_decay_alpha=patch_pixel_decay_alpha,
-                               patch_position_decay_alpha=patch_position_decay_alpha,
                                      )
                 autoencoder.train()
                 image = make_image_grid(
@@ -382,9 +339,7 @@ def load_and_transform_dataset(
 
     def preproc(x):
         x['pixel_values'] = x['pixel_values'].to(device)
-        patches, positions, channels, original_sizes, patch_sizes = dct_processor.preprocess([x["pixel_values"]])
-        x["patches"], x["positions"], x['channels'], x["original_sizes"], x["patch_sizes"]  = patches[0], positions[0], channels[0], original_sizes[0], patch_sizes[0]
-        return x
+        return dct_processor.preprocess(x["pixel_values"])
 
     ds = (
         wds.WebDataset(dataset_name_or_url, handler=wds.handlers.warn_and_continue)
@@ -393,7 +348,6 @@ def load_and_transform_dataset(
         .decode("torchrgb", partial=True, handler=wds.handlers.warn_and_continue)
         .rename(pixel_values="jpg", handler=wds.handlers.warn_and_continue)
         .map(preproc, handler=wds.handlers.warn_and_continue)
-        .rename_keys(patches="patches", positions="positions", channels='channels', original_sizes="original_sizes", patch_sizes="patch_sizes", )
     )
 
     return ds
@@ -427,7 +381,7 @@ def get_model(model_config: DCTAutoencoderConfig,
 
 def main(
     image_dataset_path_or_url:str = None,
-    model_config_path = "./conf/patch4_small.json",
+    model_config_path = "./conf/patch16.json",
     resume_path: Optional[str] = None,
     device="cuda",
     dtype=torch.bfloat16,
@@ -450,8 +404,6 @@ def main(
     max_iters_pixel_loss: int =  5000,
     batch_size_pixel_loss: int = 8,
     seed: int=42,
-    patch_pixel_decay_alpha:float=0.05,
-    patch_position_decay_alpha:float=0.1,
 ):
     model_config = DCTAutoencoderConfig.from_json_file(model_config_path)
 
@@ -519,8 +471,6 @@ def main(
         feature_dim=model_config.feature_dim,
         n_attention_heads = model_config.n_attention_heads,
         patch_size=model_config.patch_size,
-        patch_pixel_decay_alpha=patch_pixel_decay_alpha,
-        patch_position_decay_alpha=patch_position_decay_alpha,
         **loss_weight,
     )
 
@@ -566,8 +516,6 @@ def main(
             rng=rng,
             loss_weight=loss_weight,
             optimizer=optimizer,
-            patch_pixel_decay_alpha=patch_pixel_decay_alpha,
-            patch_position_decay_alpha=patch_position_decay_alpha,
         )
 
     # this trains using longer sequence lengths and a smaller batch size
@@ -594,8 +542,6 @@ def main(
             vq_callables=vq_callables,
             rng=rng,
             loss_weight=loss_weight,
-            patch_pixel_decay_alpha=patch_pixel_decay_alpha,
-            patch_position_decay_alpha=patch_position_decay_alpha,
         )
 
     # this trains using long sequence lengths as well as pixel loss
@@ -619,8 +565,6 @@ def main(
             rng=rng,
             loss_weight=loss_weight,
             use_pixel_loss=True,
-            patch_pixel_decay_alpha=patch_pixel_decay_alpha,
-            patch_position_decay_alpha=patch_position_decay_alpha,
         )
 
 

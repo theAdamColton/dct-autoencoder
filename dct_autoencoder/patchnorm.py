@@ -3,6 +3,8 @@ import torch
 from torch import nn
 from einops import repeat
 
+from dct_autoencoder.dct_patches import DCTPatches
+
 
 def scatter_add_3d(
     x: torch.Tensor,
@@ -36,31 +38,31 @@ class PatchNorm(nn.Module):
 
     def __init__(
         self,
-        max_patches_h: int,
+        max_patch_h: int,
         max_patch_w: int,
-        patch_res: int,
+        patch_size: int,
         channels: int,
-        eps: float = 1e-1,
+        eps: float = 1e-6,
     ):
         super().__init__()
         self.eps = eps
-        self.patch_res = patch_res
+        self.patch_size = patch_size
         self.channels = channels
 
         self.n = nn.Parameter(
             torch.zeros(
                 channels,
-                max_patches_h,
+                max_patch_h,
                 max_patch_w,
             ),
             requires_grad=False,
         )
         self.mean = nn.Parameter(
-            torch.zeros(channels, max_patches_h, max_patch_w, patch_res ** 2),
+            torch.zeros(channels, max_patch_h, max_patch_w, patch_size ** 2),
             requires_grad=False,
         )
         self.m2 = nn.Parameter(
-            torch.zeros(channels, max_patches_h, max_patch_w, patch_res ** 2),
+            torch.zeros(channels, max_patch_h, max_patch_w, patch_size ** 2),
             requires_grad=False,
         )
 
@@ -69,7 +71,7 @@ class PatchNorm(nn.Module):
     @property
     def var(self):
         mask = self.n < 2
-        var = self.m2 / self.n.unsqueeze(-1).clamp(1.0)
+        var = self.m2 / self.n.unsqueeze(-1).clamp(1)
         var[mask] = 1.0
         return var
 
@@ -79,12 +81,8 @@ class PatchNorm(nn.Module):
 
     def forward(
         self,
-        patches: torch.Tensor,
-        pos_channels: torch.LongTensor,
-        pos_h: torch.LongTensor,
-        pos_w: torch.LongTensor,
-        key_pad_mask: torch.BoolTensor,
-    ):
+        dct_patches: DCTPatches,
+    ) -> torch.Tensor:
         """
         normalizes patches using patch wieghts and biases that are indexed by pos_h and pos_w and channels
 
@@ -92,6 +90,12 @@ class PatchNorm(nn.Module):
 
         patches should be (..., dim)
         """
+
+        patches = dct_patches.patches
+        pos_channels = dct_patches.patch_channels
+        pos_h = dct_patches.h_indices
+        pos_w = dct_patches.w_indices
+        key_pad_mask = dct_patches.key_pad_mask
 
         # first masks based on the key_pad_mask
         # this is important because we don't want the patch statistics effected
@@ -130,6 +134,10 @@ class PatchNorm(nn.Module):
         return out
 
     def inverse_norm(
-            self, patches: torch.Tensor, pos_channels: torch.LongTensor, pos_h: torch.LongTensor, pos_w: torch.LongTensor
-    ):
+            self, dct_patches: DCTPatches
+    ) -> torch.Tensor:
+        patches = dct_patches.patches
+        pos_channels = dct_patches.patch_channels
+        pos_h = dct_patches.h_indices
+        pos_w = dct_patches.w_indices
         return  patches * (self.std[pos_channels, pos_h, pos_w] + self.eps) + self.mean[pos_channels, pos_h, pos_w]

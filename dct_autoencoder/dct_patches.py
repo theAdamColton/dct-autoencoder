@@ -25,6 +25,19 @@ class DCTPatches:
     def w_indices(self):
         return self.patch_positions[..., 1]
 
+    def shallow_copy(self):
+        return DCTPatches(
+                patches = self.patches,
+                key_pad_mask=self.key_pad_mask,
+                attn_mask=self.attn_mask,
+                batched_image_ids=self.batched_image_ids,
+                patch_channels=self.patch_channels,
+                patch_positions=self.patch_positions,
+                patch_sizes=self.patch_sizes,
+                original_sizes=self.original_sizes,
+            )
+
+
     def to(self, what):
         self.patches = self.patches.to(what)
         self.key_pad_mask = self.key_pad_mask.to(what)

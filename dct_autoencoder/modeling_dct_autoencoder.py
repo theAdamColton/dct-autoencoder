@@ -25,7 +25,7 @@ class DCTAutoencoder(PreTrainedModel):
 
         self.config = config
 
-        self.patchnorm = PatchNorm(max_patches_h=config.max_patch_h, max_patch_w=config.max_patch_w, patch_res = config.patch_size, channels=config.image_channels)
+        self.patchnorm = PatchNorm(max_patch_h=config.max_patch_h, max_patch_w=config.max_patch_w, patch_size = config.patch_size, channels=config.image_channels)
 
         patch_dim = config.patch_size**2
         max_n_patches = config.max_patch_h * config.max_patch_w
@@ -111,7 +111,11 @@ class DCTAutoencoder(PreTrainedModel):
                    x: DCTPatches,
                    ):
         with torch.no_grad():
-            x.patches = self.patchnorm(x.patches, x.patch_channels, x.h_indices, x.w_indices, x.key_pad_mask, )
+            x.patches = self.patchnorm(x)
+        return x
+
+    def _inv_normalize(self,x:DCTPatches,):
+        x.patches = self.patchnorm.inverse_norm(x)
         return x
 
     def encode(

@@ -115,18 +115,14 @@ def ycbcr_to_rgb(x: torch.Tensor):
 
     return torch.stack([r,g,b,], dim=-3)
     
-
-def lightness(x: torch.Tensor, c_dim=-3, keepdim=False):
-    """
-    uses Y204 (Adobe) https://en.wikipedia.org/wiki/HSL_and_HSV#Lightness
-    """
-    color_weights = torch.Tensor([0.212, 0.701, 0.087]).to(x.device).to(x.dtype)
-    to_unsqueeze = abs(c_dim+1)
-    for _ in range(to_unsqueeze):
-        color_weights = color_weights.unsqueeze(-1)
-    return (color_weights* x).mean(dim=c_dim, keepdim=keepdim)
-
-
+def tuple_collate(x: List[Tuple]):
+    assert len(x) > 0
+    num_columns = len(x[0])
+    lists = [list() for _ in range(num_columns)]
+    for row in x:
+        for i, col in enumerate(row):
+            lists[i].append(col)
+    return lists
 
 
 def pad_sequence(seq:List[torch.Tensor], max_seq_len):
@@ -336,15 +332,11 @@ def calculate_perplexity(codes, codebook_size, null_index=-1):
 
 
 def imshow(x: torch.Tensor, ax=None):
-    x = x.cpu()
+    x = x.cpu().float()
     if len(x.shape) > 2:
         x = x.permute(1, 2, 0)
-    if x.dtype == torch.int:
-        x = x * 1.0
-    if x.dtype != torch.bool:
-        x = x - x.quantile(0.1)
-        x = x / x.quantile(0.9)
-        x = x.clamp(0.0, 1.0)
+
+    x = x.clamp(0.0, 1.0)
 
     if ax is None:
         ax = plt

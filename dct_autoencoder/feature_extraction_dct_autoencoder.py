@@ -138,35 +138,24 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
             
 
     @torch.no_grad()
-    def preprocess(self, x: List[torch.Tensor]):
+    def preprocess(self, im: torch.Tensor):
         """
         preprocess but don't batch
         """
-        cropped_ims = []
-        patch_sizes = []
-        original_sizes = []
-        for im in x:
-            im = self._transform_image_in(im)
-            _,h,w = im.shape
-            original_sizes.append((h,w))
+        im = self._transform_image_in(im)
+        _,h,w = im.shape
+        original_size = (h,w)
 
-            cropped_im = self._crop_image(im)
-            _,ch,cw = cropped_im.shape
+        cropped_im = self._crop_image(im)
+        _,ch,cw = cropped_im.shape
 
-            ph, pw = ch // self.patch_size, cw//self.patch_size
-            patch_sizes.append((ph, pw))
-            cropped_ims.append(cropped_im)
+        ph, pw = ch // self.patch_size, cw//self.patch_size
+        patch_size = (ph, pw)
+        cropped_im = cropped_im
 
-        patched_ims = []
-        positions = []
-        all_channels = []
-        for cropped_im in cropped_ims:
-            patches, pos, channels = self._patch_image(cropped_im)
-            patched_ims.append(patches)
-            positions.append(pos)
-            all_channels.append(channels)
+        patches, pos, channels = self._patch_image(cropped_im)
 
-        return patched_ims, positions, all_channels, original_sizes, patch_sizes
+        return patches, pos, channels, original_size, patch_size
 
     @torch.no_grad()
     def iter_batches(self, dataloader, batch_size: Optional[int] = None):
@@ -178,7 +167,7 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         cum_original_sizes = []
         cum_patch_sizes = []
         while True:
-            patches, positions, channels, original_sizes, patch_sizes = next(dataloader)
+            [patches, positions, channels, original_sizes, patch_sizes] = next(dataloader)
 
             # keeps on cpu, as to not waste gpu space
             patches = [p.to('cpu') for p in patches]
