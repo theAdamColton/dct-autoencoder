@@ -81,7 +81,7 @@ from transformers.feature_extraction_utils import FeatureExtractionMixin
 from .dct_patches import DCTPatches
 from .util import (
     dct2,
-    exp_dist,
+    exp_trunc_dist,
     idct2,
     pad_sequence,
     ipt_to_rgb,
@@ -326,7 +326,6 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
 
         h_indices, w_indices = torch.meshgrid(torch.arange(ph, device=x.device), torch.arange(pw, device=x.device), indexing='ij')
 
-
         # makes it so that ph and pw that are out of bounds can't be selected
         _mask = torch.logical_and(h_indices < self.max_patch_h, w_indices < self.max_patch_w)
         x = x[_mask.flatten()]
@@ -338,7 +337,7 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         mags = x.abs().amax(-1)
 
         # distances from upper left corner
-        distance_weight = 0.5
+        distance_weight = 1.0
         distances = ((h_indices + w_indices) * - distance_weight).flatten()
 
         # sorts by magnitude and distance
@@ -354,26 +353,27 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
 
         # also if sample_patches_beta is set, then k will be sampled from the
         # exponential distribution
-        k = ph * pw
-        k = min(k, self.max_patch_h * self.max_patch_w)
-        k = min(k, self.max_seq_len)
 
+        k = distances.shape[0] * self.channels
         if self.sample_patches_beta > 0.00:
             # samples from the exponential distribution to get k
-            k = min(round(exp_dist(self.sample_patches_beta)), k)
-            # at least the base channels are needed
-            k = max(c, k)
+            k = min(round(exp_trunc_dist(self.sample_patches_beta)), k)
+            k = max(1, k)
+
+        k = min(k, self.max_patch_h * self.max_patch_w)
+        k = min(k, self.max_seq_len)
 
         # now splits up the k patches between the channels
         # each channel gets it's own patches
         channel_k = (self.channel_importances * k).round().long()
         # there should be at least one patch per channel
-        channel_k = channel_k.clamp(1)
-
+        # and there can't be more channel_k than there are patches to pick from
         # handles the remainder
         _total_channel_k = channel_k.sum()
         channel_k[0] = channel_k[0] - (_total_channel_k - k)
-        assert channel_k.sum() == k
+        assert channel_k.sum() <= self.max_seq_len, channel_k.sum()
+
+        channel_k = channel_k.clamp(1, distances.shape[0])
 
         h_indices_f = h_indices.reshape(-1)
         w_indices_f = w_indices.reshape(-1)
@@ -383,9 +383,12 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         positions_h = []
         positions_w = []
         for i in range(c):
+            assert per_channel_sorted_idx.shape[0] >= channel_k[i]
+
             ind = per_channel_sorted_idx[:channel_k[i].item(), i]
 
             x_c = x[ind, i, :]
+            assert x_c.shape[-1] == self.patch_size**2, x_c.shape
             x_out.append(x_c)
             channels.append(
                     torch.Tensor([i] * channel_k[i])
@@ -410,7 +413,8 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
 
         s, z = x_out.shape
         assert z == self.patch_size ** 2, f"{z} != {self.patch_size ** 2}"
-        assert s == k
+        assert s <= self.max_seq_len
+
 
         # x is shape c, k
         return x_out, pos, channels

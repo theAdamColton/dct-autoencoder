@@ -184,11 +184,11 @@ def train_patch_norm(patch_norm: PatchNorm,
         batch = batch.to(device)
         batch.patches = batch.patches.to(torch.float32)
         normalized_patches = patch_norm.forward(batch)
-        mean = normalized_patches[~batch.key_pad_mask].mean() .item()
+        median = normalized_patches[~batch.key_pad_mask].median(0).values.mean().item()
         std = normalized_patches[~batch.key_pad_mask].std()   .item()
         _min = normalized_patches[~batch.key_pad_mask].min()  .item()
         _max = normalized_patches[~batch.key_pad_mask].max()  .item()
-        print(f"{i+1:03} mean {mean:.2f} std {std:.2f} min {_min:.2f} max {_max:.2f}")
+        print(f"{i+1:03} median {median:.2f} std {std:.2f} min {_min:.2f} max {_max:.2f}")
 
     patch_norm.frozen = True
     patch_norm = patch_norm.to(dtype)
@@ -333,8 +333,24 @@ def load_and_transform_dataset(
             return False
         return False if h < min_res or w < min_res else True
 
+    # some buffer room, gives you better dct features to use bigger images
+    max_size = max(dct_processor.patch_size * max(dct_processor.max_patch_w, dct_processor.max_patch_h), 768)
+
     def preproc(x):
         x['pixel_values'] = x['pixel_values'].to(device)
+        _, h, w = x['pixel_values'].shape
+        if max(h,w) > max_size:
+            ar = h/w
+            if h > w:
+                h = max_size
+                w = int(h / ar)
+            else:
+                w = max_size
+                h = int(ar * w)
+
+            rz = transforms.Resize(min(h, w))
+            x['pixel_values'] = rz(x['pixel_values'])
+
         return dct_processor.preprocess(x["pixel_values"])
 
     ds = (

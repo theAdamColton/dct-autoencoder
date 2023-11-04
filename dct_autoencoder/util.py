@@ -140,7 +140,10 @@ def pad_sequence(seq:List[torch.Tensor], max_seq_len):
         out[i,:l] = seq[i]
     return out
 
-def exp_dist(a: float) -> float:
+def exp_trunc_dist(a: float) -> float:
+    """
+    truncated exponential, outputs values between 0 and 1
+    """
     x = random.random()
     return -1 / a * math.log(x)
 
