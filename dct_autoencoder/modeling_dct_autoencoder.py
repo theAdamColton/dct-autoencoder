@@ -64,8 +64,8 @@ class DCTAutoencoder(PreTrainedModel):
                 dim = config.feature_dim,
                 num_codebooks=config.vq_num_codebooks,
                 codebook_size=config.vq_codebook_size,
-                straight_through_activation=nn.Tanh(),
-                )
+                #straight_through_activation=nn.Tanh(),
+            )
 
         self.decoder = Encoder(
             dim=config.feature_dim,
@@ -126,7 +126,6 @@ class DCTAutoencoder(PreTrainedModel):
         # normalizes
         if do_normalize:
             dct_patches = self._normalize(dct_patches)
-
 
         dct_patches.patches = self.to_patch_embedding(dct_patches.patches)
 

@@ -214,10 +214,11 @@ def train(
     n_log: int = 10,
     max_steps:int=1000000,
     num_workers:int=0,
-    warmup_steps=10,
+    warmup_steps=100,
     use_wandb: bool = False,
     vq_callables: List[Callable[[int], dict]] = [],
     rng=None,
+    grad_accumulation_steps:int=1,
     save_every=1000,
     use_pixel_loss=False,
     loss_weight={},
@@ -277,11 +278,11 @@ def train(
                         weight = 1.0
                     loss += v * weight
 
-            loss.backward()
+            (loss/grad_accumulation_steps).backward()
 
-            torch.nn.utils.clip_grad_norm_(autoencoder.parameters(), 1.0)
-
-            optimizer.step()
+            if (i+1)%grad_accumulation_steps == 0:
+                torch.nn.utils.clip_grad_norm_(autoencoder.parameters(), 1.0)
+                optimizer.step()
 
 
             log_dict = dict(
@@ -417,10 +418,11 @@ def main(
     batch_size_pixel_loss: int = 8,
     seed: int=42,
     log_every: int = 200,
+    grad_accumulation_steps:int=1,
 ):
     model_config = DCTAutoencoderConfig.from_json_file(model_config_path)
 
-
+    random.seed(seed)
 
     # the max sequence lengths is based off of the exp dist
     # CDF at some probability
@@ -483,6 +485,7 @@ def main(
         lfq_entropy_loss_n=lfq_entropy_loss_n,
         feature_dim=model_config.feature_dim,
         n_attention_heads = model_config.n_attention_heads,
+        grad_accumulation_steps=grad_accumulation_steps,
         patch_size=model_config.patch_size,
         **loss_weight,
     )
@@ -532,6 +535,7 @@ def main(
             loss_weight=loss_weight,
             optimizer=optimizer,
             log_every=log_every,
+        grad_accumulation_steps=grad_accumulation_steps,
         )
 
     # this trains using longer sequence lengths and a smaller batch size
@@ -559,6 +563,7 @@ def main(
             rng=rng,
             loss_weight=loss_weight,
             log_every=log_every,
+        grad_accumulation_steps=grad_accumulation_steps,
         )
 
     # this trains using long sequence lengths as well as pixel loss
@@ -583,6 +588,7 @@ def main(
             loss_weight=loss_weight,
             use_pixel_loss=True,
             log_every=log_every,
+        grad_accumulation_steps=grad_accumulation_steps,
         )
 
 
