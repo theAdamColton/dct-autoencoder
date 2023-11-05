@@ -1,24 +1,21 @@
 from typing import Callable, List, Optional
 from tqdm import tqdm
 import torch
-import webdataset as wds
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
 import torchvision.transforms as transforms
 import torchvision
 import os
-import math
 import time
-import json
 import wandb
 import random
 
 
-from dct_autoencoder.feature_extraction_dct_autoencoder import (
-    DCTAutoencoderFeatureExtractor,
-)
+from dct_autoencoder.feature_extraction_dct_autoencoder import DCTAutoencoderFeatureExtractor
 from dct_autoencoder.patchnorm import PatchNorm
-from dct_autoencoder.util import power_of_two, calculate_perplexity, tuple_collate
+from dct_autoencoder.util import calculate_perplexity
+from dct_autoencoder.factory import get_model
+from dct_autoencoder.dataset import load_and_transform_dataset, load_preprocessed_dataset, tuple_collate
 from dct_autoencoder.dct_patches import DCTPatches, slice_dctpatches
 from dct_autoencoder.modeling_dct_autoencoder import DCTAutoencoder
 from dct_autoencoder.configuration_dct_autoencoder import DCTAutoencoderConfig
@@ -353,85 +350,11 @@ def train(
     return autoencoder, optimizer
 
 
-def load_and_transform_dataset(
-    dataset_name_or_url: str,
-    dct_processor: DCTAutoencoderFeatureExtractor,
-    device="cpu",
-):
-    min_res = dct_processor.patch_size
-
-    def filter_res(x):
-        h, w = x["json"]["height"], x["json"]["width"]
-        if h is None or w is None:
-            return False
-        return False if h < min_res or w < min_res else True
-
-    # some buffer room, gives you better dct features to use bigger images
-    max_size = max(
-        dct_processor.patch_size
-        * max(dct_processor.max_patch_w, dct_processor.max_patch_h),
-        768,
-    )
-
-    def preproc(x):
-        x["pixel_values"] = x["pixel_values"].to(device)
-        _, h, w = x["pixel_values"].shape
-        if max(h, w) > max_size:
-            ar = h / w
-            if h > w:
-                h = max_size
-                w = int(h / ar)
-            else:
-                w = max_size
-                h = int(ar * w)
-
-            rz = transforms.Resize(min(h, w))
-            x["pixel_values"] = rz(x["pixel_values"])
-
-        return dct_processor.preprocess(x["pixel_values"])
-
-    ds = (
-        wds.WebDataset(dataset_name_or_url, handler=wds.handlers.warn_and_continue)
-        .map_dict(json=json.loads, handler=wds.handlers.warn_and_continue)
-        .select(
-            filter_res,
-        )
-        .decode("torchrgb", partial=True, handler=wds.handlers.warn_and_continue)
-        .rename(pixel_values="jpg", handler=wds.handlers.warn_and_continue)
-        .map(preproc, handler=wds.handlers.warn_and_continue)
-    )
-
-    return ds
-
-
-def get_model(
-    model_config: DCTAutoencoderConfig,
-    device,
-    dtype,
-    sample_patches_beta,
-    max_seq_len,
-    resume_path,
-):
-    proc = DCTAutoencoderFeatureExtractor(
-        channels=model_config.image_channels,
-        patch_size=model_config.patch_size,
-        sample_patches_beta=sample_patches_beta,
-        max_patch_h=model_config.max_patch_h,
-        max_patch_w=model_config.max_patch_w,
-        max_seq_len=max_seq_len,
-    )
-
-    if resume_path is not None:
-        model = DCTAutoencoder.from_pretrained(resume_path).to(dtype).to(device)
-        print("Loaded from ", resume_path)
-    else:
-        model = DCTAutoencoder(model_config).to(dtype).to(device)
-
-    return model, proc
-
-
 def main(
+    # specify one of the below two
     image_dataset_path_or_url: str = None,
+    preprocessed_dataset_path_or_url: str = None,
+
     model_config_path="./conf/patch16.json",
     resume_path: Optional[str] = None,
     device="cuda",
@@ -441,7 +364,7 @@ def main(
     use_wandb: bool = False,
     train_norm_iters: int = 10,
     max_iters: int = 10000,
-    sample_patches_beta: float = 2.5,
+    sample_patches_beta: float = 0.1,
     batch_size_ft: int = 16,
     max_iters_ft: int = 10000,
     sample_patches_beta_ft: float = 0.01,
@@ -458,32 +381,17 @@ def main(
     log_every: int = 200,
     grad_accumulation_steps: int = 1,
 ):
-    model_config = DCTAutoencoderConfig.from_json_file(model_config_path)
+    model_config: DCTAutoencoderConfig = DCTAutoencoderConfig.from_json_file(
+        model_config_path
+    )
 
     random.seed(seed)
 
-    # the max sequence lengths is based off of the exp dist
-    # CDF at some probability
-
-    # CDF: F(x;beta) = 1-e^(-beta*x)
-    # x is the sequence length
-    # we pick x s.t.
-    # .9 = 1-e^(-beta*x)
-    # - ln(0.1) / beta = x
-
-    cdf_p = 0.95
-    image_channels: int = model_config.image_channels
-    max_seq_len = round(-1 * math.log(1 - cdf_p) / sample_patches_beta)
-    max_seq_len = power_of_two(max_seq_len)
-    max_seq_len = min(
-        model_config.max_patch_h * model_config.max_patch_w * image_channels,
-        max_seq_len,
-    )
-    max_seq_len_ft = model_config.max_patch_h * model_config.max_patch_w
-
     autoencoder, processor = get_model(
-        model_config, device, dtype, sample_patches_beta, max_seq_len, resume_path
+        model_config, device, dtype, sample_patches_beta, resume_path
     )
+    max_seq_len = processor.max_seq_len
+    max_seq_len_ft = processor.max_patch_h * processor.max_patch_w
 
     autoencoder.vq_model.entropy_loss_weight = lfq_entropy_loss_start
     autoencoder.vq_model.commitment_loss_weight = commitment_loss_weight_start
@@ -509,11 +417,14 @@ def main(
         }
     ]
 
-    train_ds = load_and_transform_dataset(
-        image_dataset_path_or_url,
-        processor,
-        device=device if num_workers == 0 else "cpu",
-    )
+    if image_dataset_path_or_url is not None:
+        train_ds = load_and_transform_dataset(
+            image_dataset_path_or_url,
+            processor,
+            device=device if num_workers == 0 else "cpu",
+        )
+    else:
+        train_ds = load_preprocessed_dataset(preprocessed_dataset_path_or_url)
 
     n_params = 0
     for n, p in autoencoder.named_parameters():
@@ -523,7 +434,7 @@ def main(
     run_d = dict(
         sample_patches_beta_ft=sample_patches_beta_ft,
         sample_patches_beta=sample_patches_beta,
-        max_seq_len=max_seq_len,
+        max_seq_len=processor.max_seq_len,
         max_seq_len_ft=max_seq_len_ft,
         learning_rate=learning_rate,
         learning_rate_ft=learning_rate_ft,

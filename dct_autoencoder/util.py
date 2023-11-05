@@ -134,15 +134,6 @@ def ycbcr_to_rgb(x: torch.Tensor):
     )
 
 
-def tuple_collate(x: List[Tuple]):
-    assert len(x) > 0
-    num_columns = len(x[0])
-    lists = [list() for _ in range(num_columns)]
-    for row in x:
-        for i, col in enumerate(row):
-            lists[i].append(col)
-    return lists
-
 
 def pad_sequence(seq: List[torch.Tensor], max_seq_len):
     """

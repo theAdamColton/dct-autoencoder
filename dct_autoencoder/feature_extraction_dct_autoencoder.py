@@ -76,7 +76,10 @@ from einops import rearrange
 import torch
 from torch import Tensor
 import torch.nn.functional as F
+import math
 from transformers.feature_extraction_utils import FeatureExtractionMixin
+
+from dct_autoencoder.configuration_dct_autoencoder import DCTAutoencoderConfig
 
 from .dct_patches import DCTPatches
 from .util import (
@@ -86,6 +89,7 @@ from .util import (
     pad_sequence,
     ipt_to_rgb,
     rgb_to_ipt,
+    power_of_two,
 )
 
 
@@ -168,9 +172,12 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         cum_original_sizes = []
         cum_patch_sizes = []
         while True:
-            [patches, positions, channels, original_sizes, patch_sizes] = next(
-                dataloader
-            )
+            try:
+                [patches, positions, channels, original_sizes, patch_sizes] = next(
+                    dataloader
+                )
+            except StopIteration:
+                return
 
             # keeps on cpu, as to not waste gpu space
             patches = [p.to("cpu") for p in patches]
