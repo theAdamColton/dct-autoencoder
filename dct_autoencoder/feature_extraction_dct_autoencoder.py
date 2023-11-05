@@ -99,6 +99,7 @@ class GroupPatchesState:
     group_channels: List[Tensor]
     seq_len: int
 
+
 class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
     def __init__(
         self,
@@ -108,9 +109,9 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         max_patch_h: int,
         max_patch_w: int,
         max_seq_len: int,
-        channel_importances:Tuple[float,float,float] = (8.0,1.0,1.0),
+        channel_importances: Tuple[float, float, float] = (8.0, 1.0, 1.0),
         # how import is the max magnitude of a patch when sampling which patches to drop
-        patch_sample_magnitude_weight: float= 0.5,
+        patch_sample_magnitude_weight: float = 0.5,
     ):
         self.channels = channels
         self.patch_size = patch_size
@@ -121,7 +122,6 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         self.channel_importances = torch.Tensor(channel_importances)
         self.patch_sample_magnitude_weight = patch_sample_magnitude_weight
 
-
     @torch.no_grad()
     def _transform_image_in(self, x):
         """
@@ -130,14 +130,13 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         """
         x = rgb_to_ipt(x)
         og_dtype = x.dtype
-        return dct2(x.to(torch.float32), 'ortho').to(og_dtype)
+        return dct2(x.to(torch.float32), "ortho").to(og_dtype)
 
     def _transform_image_out(self, x):
         og_dtype = x.dtype
-        image = idct2(x.to(torch.float32), 'ortho').to(og_dtype)
+        image = idct2(x.to(torch.float32), "ortho").to(og_dtype)
         image = ipt_to_rgb(image)
         return image
-            
 
     @torch.no_grad()
     def preprocess(self, im: torch.Tensor):
@@ -145,13 +144,13 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         preprocess but don't batch
         """
         im = self._transform_image_in(im)
-        _,h,w = im.shape
-        original_size = (h,w)
+        _, h, w = im.shape
+        original_size = (h, w)
 
         cropped_im = self._crop_image(im)
-        _,ch,cw = cropped_im.shape
+        _, ch, cw = cropped_im.shape
 
-        ph, pw = ch // self.patch_size, cw//self.patch_size
+        ph, pw = ch // self.patch_size, cw // self.patch_size
         patch_size = (ph, pw)
         cropped_im = cropped_im
 
@@ -169,17 +168,21 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         cum_original_sizes = []
         cum_patch_sizes = []
         while True:
-            [patches, positions, channels, original_sizes, patch_sizes] = next(dataloader)
+            [patches, positions, channels, original_sizes, patch_sizes] = next(
+                dataloader
+            )
 
             # keeps on cpu, as to not waste gpu space
-            patches = [p.to('cpu') for p in patches]
-            positions = [p.to('cpu') for p in positions]
-            channels = [c.to('cpu') for c in channels]
+            patches = [p.to("cpu") for p in patches]
+            positions = [p.to("cpu") for p in positions]
+            channels = [c.to("cpu") for c in channels]
 
             cum_original_sizes = cum_original_sizes + original_sizes
             cum_patch_sizes = cum_patch_sizes + patch_sizes
 
-            state = self._group_patches_by_max_seq_len(patches, positions, channels, state)
+            state = self._group_patches_by_max_seq_len(
+                patches, positions, channels, state
+            )
 
             if batch_size is None:
                 # immediately output a batch for this state
@@ -197,23 +200,23 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
             if batch_size is None or cur_batch_size > batch_size:
                 # clips state
                 new_state = GroupPatchesState(
-                        groups=state.groups[batch_size:],
-                        groups_pos = state.groups_pos[batch_size:],
-                        group=state.group,
-                        group_pos=state.group_pos,
-                        groups_channels=state.groups_channels[batch_size:],
-                        group_channels=state.group_channels,
-                        seq_len=state.seq_len,
+                    groups=state.groups[batch_size:],
+                    groups_pos=state.groups_pos[batch_size:],
+                    group=state.group,
+                    group_pos=state.group_pos,
+                    groups_channels=state.groups_channels[batch_size:],
+                    group_channels=state.group_channels,
+                    seq_len=state.seq_len,
                 )
                 state = GroupPatchesState(
-                        groups=state.groups[:batch_size],
-                        groups_pos = state.groups_pos[:batch_size],
-                        groups_channels=state.groups_channels[:batch_size],
-                        group_channels=[],
-                        group=[],
-                        group_pos=[],
-                        seq_len=0,
-                        )
+                    groups=state.groups[:batch_size],
+                    groups_pos=state.groups_pos[:batch_size],
+                    groups_channels=state.groups_channels[:batch_size],
+                    group_channels=[],
+                    group=[],
+                    group_pos=[],
+                    seq_len=0,
+                )
 
                 n_items_in_batch = sum(len(x) for x in state.groups)
 
@@ -222,7 +225,13 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
                 cum_original_sizes = cum_original_sizes[:n_items_in_batch]
                 cum_patch_sizes = cum_patch_sizes[:n_items_in_batch]
 
-                batch = self._batch_groups(state.groups, state.groups_pos, state.groups_channels, original_sizes = cum_original_sizes, patch_sizes = cum_patch_sizes)
+                batch = self._batch_groups(
+                    state.groups,
+                    state.groups_pos,
+                    state.groups_channels,
+                    original_sizes=cum_original_sizes,
+                    patch_sizes=cum_patch_sizes,
+                )
 
                 if batch_size is not None:
                     assert batch.patches.shape[0] == batch_size
@@ -238,7 +247,6 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
 
                 yield batch
 
-
     def postprocess(self, x: DCTPatches) -> List[torch.Tensor]:
         """
         x: DCTPatches that are not normalized
@@ -250,7 +258,9 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         for image, (h, w) in zip(dct_images, x.original_sizes):
             ch, cw = image.shape[-2:]
 
-            im_pad = torch.zeros(self.channels, h, w, device=image.device, dtype=image.dtype)
+            im_pad = torch.zeros(
+                self.channels, h, w, device=image.device, dtype=image.dtype
+            )
 
             im_pad[:, :ch, :cw] = image
 
@@ -260,7 +270,7 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
 
         return images
 
-    def _get_crop_dims(self, h:int, w:int):
+    def _get_crop_dims(self, h: int, w: int):
         assert h >= self.patch_size
         assert w >= self.patch_size
 
@@ -268,18 +278,17 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         p_h = int(h / self.patch_size)
         p_w = int(w / self.patch_size)
 
-
-#        ar = h/w
-#
-#        if p_h > self.max_patch_h:
-#            p_h = self.max_patch_h
-#            p_w = int(p_h / ar)
-#        if p_w > self.max_patch_w:
-#            p_w = self.max_patch_w
-#            p_h = int(ar * p_w)
-#
-#        p_h = min(p_h, self.max_patch_h)
-#        p_w = min(p_w, self.max_patch_w)
+        #        ar = h/w
+        #
+        #        if p_h > self.max_patch_h:
+        #            p_h = self.max_patch_h
+        #            p_w = int(p_h / ar)
+        #        if p_w > self.max_patch_w:
+        #            p_w = self.max_patch_w
+        #            p_h = int(ar * p_w)
+        #
+        #        p_h = min(p_h, self.max_patch_h)
+        #        p_w = min(p_w, self.max_patch_w)
         p_h = max(p_h, 1)
         p_w = max(p_w, 1)
 
@@ -296,7 +305,6 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
 
         return c_h, c_w
 
-
     @torch.no_grad()
     def _crop_image(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -309,7 +317,7 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         c, h, w = x.shape
 
         assert c == self.channels
-        c_h, c_w = self._get_crop_dims(h,w)
+        c_h, c_w = self._get_crop_dims(h, w)
         x = x[:, :c_h, :c_w]
 
         return x
@@ -321,16 +329,26 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         assert h % self.patch_size == 0
         assert w % self.patch_size == 0
 
-        ph, pw = h//self.patch_size, w//self.patch_size
+        ph, pw = h // self.patch_size, w // self.patch_size
 
         # patches x into a list of patches
-        x = rearrange(x, "c (h p1) (w p2) -> (h w) c (p1 p2)", p1=self.patch_size, p2=self.patch_size, c = self.channels)
+        x = rearrange(
+            x,
+            "c (h p1) (w p2) -> (h w) c (p1 p2)",
+            p1=self.patch_size,
+            p2=self.patch_size,
+            c=self.channels,
+        )
 
         c_indices = torch.arange(c, device=x.device).unsqueeze(0)
         # same number of (h w) as x
         c_indices = c_indices.expand(x.shape[0], -1)
 
-        h_indices, w_indices = torch.meshgrid(torch.arange(ph, device=x.device), torch.arange(pw, device=x.device), indexing='ij')
+        h_indices, w_indices = torch.meshgrid(
+            torch.arange(ph, device=x.device),
+            torch.arange(pw, device=x.device),
+            indexing="ij",
+        )
 
         # makes it so that ph and pw that are out of bounds can't be selected
         _mask = (h_indices < self.max_patch_h) & (w_indices < self.max_patch_w)
@@ -384,11 +402,11 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
 
         pos = torch.stack([sampled_h_indices, sampled_w_indices], -1)
 
-        x = x.reshape(-1, self.patch_size**2)[masked_idx,:]
+        x = x.reshape(-1, self.patch_size**2)[masked_idx, :]
         channels = c_indices.flatten()[masked_idx]
 
         s, z = x.shape
-        assert z == self.patch_size ** 2, f"{z} != {self.patch_size ** 2}"
+        assert z == self.patch_size**2, f"{z} != {self.patch_size ** 2}"
         assert s <= self.max_seq_len
 
         # x is shape c, k
@@ -396,12 +414,12 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
 
     @torch.no_grad()
     def _group_patches_by_max_seq_len(
-            self,
-            batched_patches: List[Tensor],
-            batched_positions: List[Tensor],
-            batched_channels: List[Tensor],
-            state: Optional[GroupPatchesState]=None,
-            ) -> GroupPatchesState:
+        self,
+        batched_patches: List[Tensor],
+        batched_positions: List[Tensor],
+        batched_channels: List[Tensor],
+        state: Optional[GroupPatchesState] = None,
+    ) -> GroupPatchesState:
         """
         converts a list of ungrouped tensors into batched groups
         """
@@ -413,9 +431,19 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
             groups_channels = []
             group_channels = []
             seq_len = 0
-            state = GroupPatchesState(groups, groups_pos, group, group_pos, groups_channels, group_channels, seq_len)
+            state = GroupPatchesState(
+                groups,
+                groups_pos,
+                group,
+                group_pos,
+                groups_channels,
+                group_channels,
+                seq_len,
+            )
 
-        for patches, pos, channels in zip(batched_patches, batched_positions, batched_channels):
+        for patches, pos, channels in zip(
+            batched_patches, batched_positions, batched_channels
+        ):
             assert isinstance(patches, Tensor)
             assert isinstance(channels, Tensor)
             assert isinstance(pos, Tensor)
@@ -423,7 +451,8 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
             k, _ = patches.shape
 
             assert (
-            k <= self.max_patch_h*self.max_patch_w*self.channels and k <= self.max_seq_len
+                k <= self.max_patch_h * self.max_patch_w * self.channels
+                and k <= self.max_seq_len
             ), f"patch with len {k} exceeds maximum sequence length"
 
             assert k == channels.shape[0]
@@ -445,18 +474,18 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         return state
 
     @torch.no_grad()
-    def _batch_groups(self,
-               grouped_batched_patches: List[List[Tensor]],
-               grouped_batched_positions: List[List[Tensor]],
-               grouped_batched_channels: List[List[Tensor]],
-               device=torch.device('cpu'),
-               **dct_patch_kwargs,
-                      ) -> DCTPatches:
+    def _batch_groups(
+        self,
+        grouped_batched_patches: List[List[Tensor]],
+        grouped_batched_positions: List[List[Tensor]],
+        grouped_batched_channels: List[List[Tensor]],
+        device=torch.device("cpu"),
+        **dct_patch_kwargs,
+    ) -> DCTPatches:
         """
         returns a batch of DCTPatches
         """
         arange = partial(torch.arange, device=device)
-
 
         assert len(grouped_batched_positions) == len(grouped_batched_patches)
         assert len(grouped_batched_positions) == len(grouped_batched_channels)
@@ -469,17 +498,21 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         batched_channels = []
         batched_image_ids = []
 
-        for grouped_patches, grouped_positions, grouped_channels in zip(grouped_batched_patches, grouped_batched_positions, grouped_batched_channels):
+        for grouped_patches, grouped_positions, grouped_channels in zip(
+            grouped_batched_patches, grouped_batched_positions, grouped_batched_channels
+        ):
             assert len(grouped_patches) == len(grouped_positions)
             assert len(grouped_channels) == len(grouped_positions)
             num_images.append(len(grouped_patches))
 
             image_ids = torch.empty((0,), device=device, dtype=torch.long)
 
-            for image_id, (patches, positions, channels) in enumerate(zip(grouped_patches, grouped_positions, grouped_channels)):
+            for image_id, (patches, positions, channels) in enumerate(
+                zip(grouped_patches, grouped_positions, grouped_channels)
+            ):
                 k, z = patches.shape
 
-                assert z == self.patch_size ** 2, f"{z} != {self.patch_size ** 2}"
+                assert z == self.patch_size**2, f"{z} != {self.patch_size ** 2}"
 
                 assert positions.shape[0] == k
                 assert channels.shape[0] == k
@@ -532,7 +565,6 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
             **dct_patch_kwargs,
         )
 
-
     def revert_patching(self, output: DCTPatches) -> List[torch.Tensor]:
         """
         This function takes a y, which has the same leading shape as x,
@@ -546,7 +578,12 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         images = []
 
         for batch_i, (image_ids, mask, positions, channels) in enumerate(
-            zip(output.batched_image_ids, output.key_pad_mask, output.patch_positions, output.patch_channels)
+            zip(
+                output.batched_image_ids,
+                output.key_pad_mask,
+                output.patch_positions,
+                output.patch_channels,
+            )
         ):
             # take the tokens that have actual images associated with them
             for image_id in image_ids.unique():
@@ -556,13 +593,25 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
                 channels_from_image = channels[is_image]
                 ph, pw = output.patch_sizes[len(images)]
 
-                image = torch.zeros(self.channels, ph, pw, z, dtype=x.dtype, device=x.device)
+                image = torch.zeros(
+                    self.channels, ph, pw, z, dtype=x.dtype, device=x.device
+                )
 
-                for token, pos, channel in zip(tokens_from_image, positions_from_image, channels_from_image):
-                    pos_h,pos_w = pos.unbind(-1)
-                    image[channel, pos_h, pos_w, :] = token 
+                for token, pos, channel in zip(
+                    tokens_from_image, positions_from_image, channels_from_image
+                ):
+                    pos_h, pos_w = pos.unbind(-1)
+                    image[channel, pos_h, pos_w, :] = token
 
-                image = rearrange(image.view(self.channels, ph*pw, -1), 'c (ph pw) (p1 p2) -> c (ph p1) (pw p2)', p1=self.patch_size, p2=self.patch_size, ph=ph, pw=pw, c=self.channels)
+                image = rearrange(
+                    image.view(self.channels, ph * pw, -1),
+                    "c (ph pw) (p1 p2) -> c (ph p1) (pw p2)",
+                    p1=self.patch_size,
+                    p2=self.patch_size,
+                    ph=ph,
+                    pw=pw,
+                    c=self.channels,
+                )
                 images.append(image)
 
         return images

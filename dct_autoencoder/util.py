@@ -11,52 +11,57 @@ from PIL import ImageFont
 from einops import einsum
 
 
-#https://ixora.io/projects/colorblindness/color-blindness-simulation-research/
+# https://ixora.io/projects/colorblindness/color-blindness-simulation-research/
 
 # sRGB -> XYZ D65
-MsRGB = torch.Tensor([[0.4124564, 0.3575761, 0.1804375],
-                  [0.2126729, 0.7151522, 0.0721750],
-                  [0.0193339, 0.1191920, 0.9503041]])
-#MsRGB = torch.Tensor([[.4360747, .3850649, .1430804],
+MsRGB = torch.Tensor(
+    [
+        [0.4124564, 0.3575761, 0.1804375],
+        [0.2126729, 0.7151522, 0.0721750],
+        [0.0193339, 0.1191920, 0.9503041],
+    ]
+)
+# MsRGB = torch.Tensor([[.4360747, .3850649, .1430804],
 #                  [0.2225045, 0.7168786, 0.0606169],
 #                  [0.0139322, 0.0971045, 0.7141733]])
 # XYZ D65 -> LMS
-MHPE = torch.Tensor([[ 0.4002, 0.7076, -0.0807],
-                 [-0.2280, 1.1500,  0.0612],
-                 [      0,      0,  0.9184]])
+MHPE = torch.Tensor(
+    [[0.4002, 0.7076, -0.0807], [-0.2280, 1.1500, 0.0612], [0, 0, 0.9184]]
+)
 
 # LMS -> ipt
-Mipt = torch.Tensor([[0.4, 0.4, 0.2],
-                     [4.455, -4.851, 0.3960],
-                     [0.8056, .3572, -1.1628]])
+Mipt = torch.Tensor(
+    [[0.4, 0.4, 0.2], [4.455, -4.851, 0.3960], [0.8056, 0.3572, -1.1628]]
+)
 Trgb2lms = MHPE @ MsRGB
 Tlms2rgb = Trgb2lms.inverse()
 
 
 def channel_mult(M, x):
-    return einsum(
-            M,
-            x,
-            'i j, ... j h w -> ... i h w')
+    return einsum(M, x, "i j, ... j h w -> ... i h w")
 
 
 def add_txt_to_pil_image(image, text):
     imd = ImageDraw.Draw(image)
-    font = ImageFont.truetype('FreeMono.ttf', 48)
-    imd.text((5, 5), text, font=font, fill =(255, 255, 255))
+    font = ImageFont.truetype("FreeMono.ttf", 48)
+    imd.text((5, 5), text, font=font, fill=(255, 255, 255))
 
 
-def rgb_to_lms(x:torch.Tensor):
+def rgb_to_lms(x: torch.Tensor):
     return channel_mult(
-            Trgb2lms.to(x.dtype).to(x.device),
-            x,)
+        Trgb2lms.to(x.dtype).to(x.device),
+        x,
+    )
 
 
-def lms_to_rgb(x:torch.Tensor):
-    return channel_mult(Tlms2rgb.to(x.dtype).to(x.device),
-                x,)
-    
-def rgb_to_ipt(x:torch.Tensor):
+def lms_to_rgb(x: torch.Tensor):
+    return channel_mult(
+        Tlms2rgb.to(x.dtype).to(x.device),
+        x,
+    )
+
+
+def rgb_to_ipt(x: torch.Tensor):
     """
     page 147
     https://scholarworks.rit.edu/theses/2858/
@@ -64,24 +69,29 @@ def rgb_to_ipt(x:torch.Tensor):
     x = rgb_to_lms(x)
     mask = x >= 0.0
     x[mask] = x[mask] ** 0.43
-    x[~mask] = -1 * (-1 * x[~mask] ) ** 0.43
-    return channel_mult(Mipt.to(x.dtype).to(x.device),
-                  x,)
+    x[~mask] = -1 * (-1 * x[~mask]) ** 0.43
+    return channel_mult(
+        Mipt.to(x.dtype).to(x.device),
+        x,
+    )
+
 
 def ipt_to_rgb(x: torch.Tensor):
     """
     page 147
     https://scholarworks.rit.edu/theses/2858/
     """
-    x = channel_mult(Mipt.inverse().to(x.dtype).to(x.device),
-                  x,)
+    x = channel_mult(
+        Mipt.inverse().to(x.dtype).to(x.device),
+        x,
+    )
     mask = x >= 0.0
     x[mask] = x[mask] ** 2.3256
-    x[~mask] = -1 * (-1 * x[~mask] ) ** 2.3256
+    x[~mask] = -1 * (-1 * x[~mask]) ** 2.3256
     return lms_to_rgb(x)
 
 
-def rgb_to_ycbcr(x:torch.Tensor):
+def rgb_to_ycbcr(x: torch.Tensor):
     """
     x: (..., c, h, w)
 
@@ -94,10 +104,11 @@ def rgb_to_ycbcr(x:torch.Tensor):
 
     y = 0.299 * r + 0.587 * g + 0.114 * b
 
-    cb = (-0.299 * r - 0.587 * g + 0.866* b ) / 1.772 + 0.5
-    cr = (0.701 * r - 0.587 * g - 0.144 * b ) / 1.402 + 0.5
+    cb = (-0.299 * r - 0.587 * g + 0.866 * b) / 1.772 + 0.5
+    cr = (0.701 * r - 0.587 * g - 0.144 * b) / 1.402 + 0.5
 
     return torch.stack([y, cb, cr], dim=-3)
+
 
 def ycbcr_to_rgb(x: torch.Tensor):
     """
@@ -110,11 +121,19 @@ def ycbcr_to_rgb(x: torch.Tensor):
     cr = x[..., 2, :, :]
 
     r = y + 1.402 * (cr - 0.5)
-    g = y - (0.114*1.772 * (cb-0.5) + 0.299 * 1.402* (cr -0.5 ) ) / 0.587
-    b = y + 1.772 * (cb -0.5)
+    g = y - (0.114 * 1.772 * (cb - 0.5) + 0.299 * 1.402 * (cr - 0.5)) / 0.587
+    b = y + 1.772 * (cb - 0.5)
 
-    return torch.stack([r,g,b,], dim=-3)
-    
+    return torch.stack(
+        [
+            r,
+            g,
+            b,
+        ],
+        dim=-3,
+    )
+
+
 def tuple_collate(x: List[Tuple]):
     assert len(x) > 0
     num_columns = len(x[0])
@@ -125,7 +144,7 @@ def tuple_collate(x: List[Tuple]):
     return lists
 
 
-def pad_sequence(seq:List[torch.Tensor], max_seq_len):
+def pad_sequence(seq: List[torch.Tensor], max_seq_len):
     """
     pads the first dim to max_seq_len and stacks
 
@@ -133,12 +152,15 @@ def pad_sequence(seq:List[torch.Tensor], max_seq_len):
     """
     back_dims = seq[0].shape[1:]
     b = len(seq)
-    out = torch.zeros((b, max_seq_len, *back_dims), dtype=seq[0].dtype, device=seq[0].device)
+    out = torch.zeros(
+        (b, max_seq_len, *back_dims), dtype=seq[0].dtype, device=seq[0].device
+    )
     for i in range(len(seq)):
         l = seq[i].shape[0]
         assert l <= max_seq_len
-        out[i,:l] = seq[i]
+        out[i, :l] = seq[i]
     return out
+
 
 def exp_trunc_dist(a: float) -> float:
     """
@@ -147,19 +169,21 @@ def exp_trunc_dist(a: float) -> float:
     x = random.random()
     return -1 / a * math.log(x)
 
-def uniform(a:float, b:float) -> float:
-    x = random.random() 
+
+def uniform(a: float, b: float) -> float:
+    x = random.random()
     if a > b:
         tmp = a
         a = b
         b = tmp
-    return x * (b-a) + a
+    return x * (b - a) + a
 
-def power_of_two(target:int) -> int:
+
+def power_of_two(target: int) -> int:
     if target > 1:
         for i in range(1, int(target)):
-            if (2 ** i >= target):
-                return 2 ** i
+            if 2**i >= target:
+                return 2**i
     return 1
 
 
@@ -210,7 +234,7 @@ def zigzag(h: int, w: int):
         Zigzag ordering of JPEG image components
         https://en.wikipedia.org/wiki/JPEG#JPEG_codec_example
     """
-    out = torch.empty((h,w), dtype=torch.long)
+    out = torch.empty((h, w), dtype=torch.long)
 
     row, col = 0, 0
 
@@ -344,7 +368,7 @@ def imshow(x: torch.Tensor, ax=None):
     if ax is None:
         ax = plt
         ax.imshow(x)
-        ax.axis('off')
+        ax.axis("off")
         plt.show()
     else:
         ax.axis("off")
@@ -362,7 +386,9 @@ def is_triangular_number(x: int):
     return (8 * x + 1) ** 0.5 % 1 > 0
 
 
-def get_upper_left_tri_p_w_channel_preferences(shape, p: float, channel_preferences: Tuple):
+def get_upper_left_tri_p_w_channel_preferences(
+    shape, p: float, channel_preferences: Tuple
+):
     """
     shape: tuple of sizes: c, h, w
 
@@ -377,15 +403,16 @@ def get_upper_left_tri_p_w_channel_preferences(shape, p: float, channel_preferen
     channel 1 and channel 2
 
     """
-    c,h,w = shape
+    c, h, w = shape
 
     prefs = torch.Tensor(channel_preferences)
     prefs = prefs / prefs.sum()
 
     channel_ps = prefs * c * p
 
-
-    tri_masks = [get_upper_left_tri_p((h,w), channel_p.item()) for channel_p in channel_ps]
+    tri_masks = [
+        get_upper_left_tri_p((h, w), channel_p.item()) for channel_p in channel_ps
+    ]
     tri_masks = torch.stack(tri_masks, dim=0)
 
     return tri_masks

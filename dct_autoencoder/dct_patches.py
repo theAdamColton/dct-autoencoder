@@ -2,6 +2,7 @@ from typing import Tuple, List
 import torch
 from dataclasses import dataclass
 
+
 @dataclass
 class DCTPatches:
     patches: torch.Tensor
@@ -27,16 +28,15 @@ class DCTPatches:
 
     def shallow_copy(self):
         return DCTPatches(
-                patches = self.patches,
-                key_pad_mask=self.key_pad_mask,
-                attn_mask=self.attn_mask,
-                batched_image_ids=self.batched_image_ids,
-                patch_channels=self.patch_channels,
-                patch_positions=self.patch_positions,
-                patch_sizes=self.patch_sizes,
-                original_sizes=self.original_sizes,
-            )
-
+            patches=self.patches,
+            key_pad_mask=self.key_pad_mask,
+            attn_mask=self.attn_mask,
+            batched_image_ids=self.batched_image_ids,
+            patch_channels=self.patch_channels,
+            patch_positions=self.patch_positions,
+            patch_sizes=self.patch_sizes,
+            original_sizes=self.original_sizes,
+        )
 
     def to(self, what):
         self.patches = self.patches.to(what)
@@ -47,31 +47,32 @@ class DCTPatches:
         self.patch_positions = self.patch_positions.to(what)
         return self
 
-def slice_dctpatches(p: DCTPatches, i:int) -> Tuple[DCTPatches, DCTPatches]:
+
+def slice_dctpatches(p: DCTPatches, i: int) -> Tuple[DCTPatches, DCTPatches]:
     if i >= p.patches.shape[0]:
-        return (p,None)
+        return (p, None)
 
     n_images_per_batch_element = p.batched_image_ids.max(dim=-1).values + 1
     n_images_p1 = n_images_per_batch_element[:i].sum().item()
     return (
         DCTPatches(
-                p.patches[:i],
-                p.key_pad_mask[:i],
-                p.attn_mask[:i],
-                p.batched_image_ids[:i],
-                p.patch_channels[:i],
-                p.patch_positions[:i],
-                p.patch_sizes[:n_images_p1],
-                p.original_sizes[:n_images_p1],
+            p.patches[:i],
+            p.key_pad_mask[:i],
+            p.attn_mask[:i],
+            p.batched_image_ids[:i],
+            p.patch_channels[:i],
+            p.patch_positions[:i],
+            p.patch_sizes[:n_images_p1],
+            p.original_sizes[:n_images_p1],
         ),
         DCTPatches(
             p.patches[i:],
-                p.key_pad_mask[i:],
-                p.attn_mask[i:],
-                p.batched_image_ids[i:],
-                p.patch_channels[i:],
-                p.patch_positions[i:],
-                p.patch_sizes[n_images_p1:],
-                p.original_sizes[n_images_p1:],
-    ),)
-
+            p.key_pad_mask[i:],
+            p.attn_mask[i:],
+            p.batched_image_ids[i:],
+            p.patch_channels[i:],
+            p.patch_positions[i:],
+            p.patch_sizes[n_images_p1:],
+            p.original_sizes[n_images_p1:],
+        ),
+    )

@@ -22,7 +22,7 @@ def scatter_add_3d(
     in place
     """
     c, h, w, z = x.shape
-    i_flat = (pos_c * h * w +  pos_h * w + pos_w).flatten()
+    i_flat = (pos_c * h * w + pos_h * w + pos_w).flatten()
     i_flat = repeat(i_flat, "n -> n z", z=z)
     if y is None:
         y = torch.ones_like(i_flat, dtype=x.dtype)
@@ -30,8 +30,7 @@ def scatter_add_3d(
 
 
 class PatchNorm(nn.Module):
-    """
-    """
+    """ """
 
     def __init__(
         self,
@@ -40,8 +39,8 @@ class PatchNorm(nn.Module):
         patch_size: int,
         channels: int,
         eps: float = 1e-6,
-        max_val: float = 5.,
-        min_val: float = -5.,
+        max_val: float = 5.0,
+        min_val: float = -5.0,
     ):
         super().__init__()
         self.eps = eps
@@ -59,12 +58,12 @@ class PatchNorm(nn.Module):
             requires_grad=False,
         )
         self.median = nn.Parameter(
-            torch.zeros(channels, max_patch_h, max_patch_w, patch_size ** 2),
+            torch.zeros(channels, max_patch_h, max_patch_w, patch_size**2),
             requires_grad=False,
         )
         # mean absolute deviation from the median
         self.b = nn.Parameter(
-            torch.ones(channels, max_patch_h, max_patch_w, patch_size ** 2),
+            torch.ones(channels, max_patch_h, max_patch_w, patch_size**2),
             requires_grad=False,
         )
 
@@ -94,10 +93,10 @@ class PatchNorm(nn.Module):
         # first masks based on the key_pad_mask
         # this is important because we don't want the patch statistics effected
         # by the padding patches, which are all zeros
-        pos_channels= pos_channels[~key_pad_mask]
+        pos_channels = pos_channels[~key_pad_mask]
         pos_h = pos_h[~key_pad_mask]
         pos_w = pos_w[~key_pad_mask]
-         
+
         patches_shape = patches.shape
 
         patches = patches[~key_pad_mask]
@@ -105,7 +104,13 @@ class PatchNorm(nn.Module):
         if self.training and not self.frozen:
             with torch.no_grad():
                 # updates n by incrementing all values at pos_channels, pos_h and pos_w
-                batch_n = torch.zeros(self.channels, self.max_patch_h, self.max_patch_w, device=patches.device, dtype = patches.dtype)
+                batch_n = torch.zeros(
+                    self.channels,
+                    self.max_patch_h,
+                    self.max_patch_w,
+                    device=patches.device,
+                    dtype=patches.dtype,
+                )
                 scatter_add_3d(batch_n.unsqueeze(-1), pos_channels, pos_h, pos_w)
 
                 batch_median = torch.zeros_like(self.median.data)
@@ -117,12 +122,15 @@ class PatchNorm(nn.Module):
                             if mask.sum() == 0:
                                 continue
                             median = patches[mask].median(0).values
-                            batch_median[c,i,j] = median
+                            batch_median[c, i, j] = median
 
                 # updates the running median by taking the weighted average of the
                 # current batch median, and the stored median.
                 # This is probably good enough as an approximation
-                self.median.data = (self.median * self.n.unsqueeze(-1) + batch_median * batch_n.unsqueeze(-1)) / (self.n + batch_n).clamp(1).unsqueeze(-1)
+                self.median.data = (
+                    self.median * self.n.unsqueeze(-1)
+                    + batch_median * batch_n.unsqueeze(-1)
+                ) / (self.n + batch_n).clamp(1).unsqueeze(-1)
 
                 distances = (patches - self.median[pos_channels, pos_h, pos_w]).abs()
 
@@ -130,15 +138,16 @@ class PatchNorm(nn.Module):
                 scatter_add_3d(batch_b, pos_channels, pos_h, pos_w, distances)
                 batch_b = batch_b / batch_n.unsqueeze(-1).clamp(1)
 
-                self.b.data = (self.b * self.n.unsqueeze(-1) + batch_b * batch_n.unsqueeze(-1)) / (self.n + batch_n).clamp(1).unsqueeze(-1)
+                self.b.data = (
+                    self.b * self.n.unsqueeze(-1) + batch_b * batch_n.unsqueeze(-1)
+                ) / (self.n + batch_n).clamp(1).unsqueeze(-1)
 
                 self.n.data = self.n + batch_n
-
 
         patches = (patches - self.median[pos_channels, pos_h, pos_w]) / (
             self.b[pos_channels, pos_h, pos_w] + self.eps
         )
-        
+
         patches.clamp_(self.min_val, self.max_val)
 
         out = torch.zeros(patches_shape, dtype=patches.dtype, device=patches.device)
@@ -146,11 +155,12 @@ class PatchNorm(nn.Module):
 
         return out
 
-    def inverse_norm(
-            self, dct_patches: DCTPatches
-    ) -> torch.Tensor:
+    def inverse_norm(self, dct_patches: DCTPatches) -> torch.Tensor:
         patches = dct_patches.patches
         pos_channels = dct_patches.patch_channels
         pos_h = dct_patches.h_indices
         pos_w = dct_patches.w_indices
-        return  patches * (self.b[pos_channels, pos_h, pos_w] + self.eps) + self.median[pos_channels, pos_h, pos_w]
+        return (
+            patches * (self.b[pos_channels, pos_h, pos_w] + self.eps)
+            + self.median[pos_channels, pos_h, pos_w]
+        )
