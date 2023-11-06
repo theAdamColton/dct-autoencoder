@@ -27,7 +27,7 @@ def load_and_transform_dataset(
     dataset_url: str,
     dct_processor: DCTAutoencoderFeatureExtractor,
     device="cpu",
-):
+) -> wds.WebDataset:
     """
     returns a dataset that is an iterable over whatever the
     dct_processor.preprocess returns
@@ -47,9 +47,9 @@ def load_and_transform_dataset(
         768,
     )
 
-    def preproc(x):
-        x["pixel_values"] = x["pixel_values"].to(device)
-        _, h, w = x["pixel_values"].shape
+    def crop(pixel_values):
+        pixel_values = pixel_values.to(device)
+        _, h, w = pixel_values.shape
         if max(h, w) > max_size:
             ar = h / w
             if h > w:
@@ -60,19 +60,19 @@ def load_and_transform_dataset(
                 h = int(ar * w)
 
             rz = transforms.Resize(min(h, w))
-            x["pixel_values"] = rz(x["pixel_values"])
-
-        return dct_processor.preprocess(x["pixel_values"])
+            pixel_values = rz(pixel_values)
+        return pixel_values
 
     ds = (
-        wds.WebDataset(dataset_url, handler=wds.handlers.warn_and_continue)
+        wds.WebDataset(dataset_url, handler=wds.handlers.warn_and_continue, verbose=True, cache_dir=None, detshuffle=True,)
         .map_dict(json=json.loads, handler=wds.handlers.warn_and_continue)
         .select(
             filter_res,
         )
         .decode("torchrgb", partial=True, handler=wds.handlers.warn_and_continue)
         .rename(pixel_values="jpg", handler=wds.handlers.warn_and_continue)
-        .map(preproc, handler=wds.handlers.warn_and_continue)
+        .map_dict(pixel_values=crop)
+        .map(lambda d: dct_processor.preprocess(d['pixel_values']))#, handler=wds.handlers.warn_and_continue)
     )
 
     return ds

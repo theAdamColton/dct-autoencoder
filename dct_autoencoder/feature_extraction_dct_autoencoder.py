@@ -151,14 +151,13 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         _, h, w = im.shape
         original_size = (h, w)
 
-        cropped_im = self._crop_image(im)
-        _, ch, cw = cropped_im.shape
+        im = self._crop_image(im)
+        _, ch, cw = im.shape
 
         ph, pw = ch // self.patch_size, cw // self.patch_size
         patch_size = (ph, pw)
-        cropped_im = cropped_im
 
-        patches, pos, channels = self._patch_image(cropped_im)
+        patches, pos, channels = self._patch_image(im)
 
         return patches, pos, channels, original_size, patch_size
 

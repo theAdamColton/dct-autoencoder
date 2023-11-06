@@ -22,9 +22,6 @@ import os
 from tqdm import tqdm
 
 from main import get_model, load_and_transform_dataset
-from dct_autoencoder.feature_extraction_dct_autoencoder import (
-    DCTAutoencoderFeatureExtractor,
-)
 from dct_autoencoder.configuration_dct_autoencoder import DCTAutoencoderConfig
 from dct_autoencoder.factory import get_model
 
@@ -34,30 +31,28 @@ def main(
     model_config_path="./conf/patch16L.json",
     output_dir: str = None,
     resume_path: str = None,
-    device="cuda",
+    device="cpu",
     dtype=torch.bfloat16,
-    seed: int = 42,
     sample_patches_beta: float = 0.02,
     # one million
     n: int = 1000000,
 ):
-    random.seed(seed)
     model_config: DCTAutoencoderConfig = DCTAutoencoderConfig.from_json_file(model_config_path)
 
-    autoencoder, processor = get_model(
+    if device == "cuda":
+        print("Warning! CUDA FFT is known to have memory leak issues! https://github.com/pytorch/pytorch/issues/94893")
+
+    model, processor = get_model(
         model_config, device, dtype, sample_patches_beta, resume_path
     )
+    del model
 
-    rng = random.Random(seed)
     dataset = load_and_transform_dataset(image_dataset_path_or_url, processor, device=device)
-    dataset.shuffle(10000, rng=rng)
+    dataset = dataset.with_length(n)
 
     os.makedirs(output_dir, exist_ok=True)
-    with wds.ShardWriter(output_dir + "/%06d.tar") as shardwriter:
-        for i, data in tqdm(enumerate(dataset), total=n):
-            if i >= n:
-                break
-
+    with wds.ShardWriter(output_dir + "/%06d.tar", maxsize=1e9, compress=True) as shardwriter:
+        for i, data in tqdm(enumerate(dataset)):
             patches, positions, channels, original_size, patch_size = data
 
             patches = patches.cpu()
@@ -72,8 +67,7 @@ def main(
                         "channels.pth":channels,
                         "original_size.pyd":original_size,
                         "patch_size.pyd":patch_size,
-                        }
-                    )
+                        })
 
 if __name__ == "__main__":
     import jsonargparse
