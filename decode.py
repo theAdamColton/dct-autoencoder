@@ -10,8 +10,9 @@ from PIL import ImageDraw
 
 from torch_dct import dct_2d, idct_2d
 from dct_autoencoder.dct_patches import DCTPatches
+from dct_autoencoder.factory import get_model_and_processor
 from dct_autoencoder import DCTAutoencoder, DCTAutoencoderFeatureExtractor
-from dct_autoencoder.util import tuple_collate
+from dct_autoencoder.dataset import tuple_collate
 
 torch.set_grad_enabled(False)
 
@@ -37,45 +38,41 @@ def main(
     image = image.to(dtype).to(device)
     _, h, w = image.shape
 
-    autoenc = DCTAutoencoder.from_pretrained(model_path).to(device).to(dtype).eval()
-    proc = DCTAutoencoderFeatureExtractor(
-        channels=autoenc.config.image_channels,
-        patch_size=autoenc.config.patch_size,
-        sample_patches_beta=0.0,
-        max_patch_h=autoenc.config.max_patch_h,
-        max_patch_w=autoenc.config.max_patch_w,
-        max_seq_len=autoenc.config.max_n_patches,
-    )
+    autoenc, proc = get_model_and_processor(resume_path=model_path, device=device, dtype=dtype)
 
     input_data = proc.preprocess(image)
     input_data = tuple_collate([input_data])
 
     batch = next(iter(proc.iter_batches(iter([input_data]))))
     batch = batch.to(device)
+    input_patches = batch.patches.clone()
 
     res = autoenc(batch, do_normalize=True)
     codes = res["codes"]
-    dct_patches = res["dct_patches"]
 
     def mask_and_rec(i: int):
         # mask all but i codes
         codes_masked = codes[:, :i, :]
 
+        # slices along seq len
+        # only works for a dct patches with a single image
         return autoenc.decode_from_codes(
             codes_masked,
-            key_pad_mask=batch.key_pad_mask,
-            attn_mask=batch.attn_mask,
-            batched_image_ids=batch.batched_image_ids,
-            patch_channels=batch.patch_channels,
-            patch_positions=batch.patch_positions,
+            do_inv_norm=True,
+            key_pad_mask=batch.key_pad_mask[:,:i],
+            attn_mask=batch.attn_mask[:,:,:i,:i],
+            batched_image_ids=batch.batched_image_ids[:,:i],
+            patch_channels=batch.patch_channels[:,:i],
+            patch_positions=batch.patch_positions[:,:i],
             patch_sizes=batch.patch_sizes,
             original_sizes=batch.original_sizes,
         )
 
     images = []
-    n = min(batch.patches.shape[1], 10)
+    end_n = min(batch.patches.shape[1], 60)
+    start_n = 1
     jmp = 1
-    for i in tqdm(range(1, n + 1, jmp)):
+    for i in tqdm(range(start_n, end_n + 1, jmp)):
         masked_dct_patches = mask_and_rec(i)
 
         _og_transform_out = proc._transform_image_out
@@ -84,34 +81,33 @@ def main(
         image_dct_masked = proc.postprocess(masked_dct_patches)[0].cpu()
         proc._transform_image_out = _og_transform_out
 
-        # an image with RGB pixels
-        image_masked = proc.postprocess(masked_dct_patches)[0].cpu()
+        # reconstructed image with RGB pixels
+        image_reconstructed = proc.postprocess(masked_dct_patches)[0].cpu()
+        image_reconstructed = image_reconstructed.clip(0,1)
 
-        masked_dct_patches.patches = batch.patches.clone()[:, :i, :]
-        # masked_dct_patches = inv_norm(masked_dct_patches)
+        # ground truth image
+        masked_dct_patches.patches = input_patches[:, :i, :]
         image_original = proc.postprocess(masked_dct_patches)[0].cpu()
-        image_original = _norm_image(image_original)
-
-        #        image_masked = rgb2hsv_torch(image_masked.unsqueeze(0)).squeeze(0)
-        #        image_masked[1] = image_masked[1] + 0.0
-        #        image_masked = rgb2hsv_torch(image_masked.unsqueeze(0)).squeeze(0)
-
-        image_masked = _norm_image(image_masked)
+        image_original = image_original.clip(0,1)
 
         im = torchvision.utils.make_grid(
-            [image_original, image_masked, image_dct_masked],
+            [image_original, image_reconstructed, image_dct_masked],
             nrow=3,
             scale_each=False,
             normalize=False,
         )
         im = torchvision.transforms.ToPILImage()(im)
         ImageDraw.Draw(im).text(  # Image
-            (0, 0), f"{i:05}", (255, 255, 2555555)  # Coordinates  # Text  # Color
+            (0, 0), f"#codes: {i * autoenc.config.vq_num_codebooks:05}", (255, 100, 100)  # Coordinates  # Text  # Color
         )
 
         images.append(im)
 
-    imageio.mimsave("dct_zigzag.gif", images, duration=3 * (n / jmp))
+    total_gif_duration_ms = 10 * 1000
+    n_frames = (end_n - start_n) / jmp
+    ms_per_frame = total_gif_duration_ms / n_frames
+    print("saving gif")
+    imageio.mimsave("dct_zigzag.gif", images, duration=ms_per_frame, loop=0)
 
 
 if __name__ == "__main__":

@@ -161,29 +161,34 @@ class DCTAutoencoder(PreTrainedModel):
         return dct_patches, codes, vq_loss
 
     def decode_from_codes(
-        self, codes: torch.LongTensor, **dct_patches_kwargs
+            self, codes: torch.LongTensor, do_inv_norm:bool=False, **dct_patches_kwargs
     ) -> DCTPatches:
         x = self.vq_model.indices_to_codes(codes)
         x = DCTPatches(patches=x, **dct_patches_kwargs)
-        return self.decode(x)
+        x = self.decode(x, do_inv_norm=do_inv_norm)
+        return x
 
     def decode(
         self,
         x: DCTPatches,
+        do_inv_norm:bool=False,
     ) -> DCTPatches:
         """
         in-place
         """
         x = self._add_pos_embedding_decoder(x)
         x.patches = self.proj_out(self.decoder(x.patches, attn_mask=~x.attn_mask))
+        if do_inv_norm:
+            x = self._inv_normalize(x)
         return x
 
     def forward(
         self,
         # expects normalized dct patches
         dct_patches: DCTPatches,
+        do_normalize:bool=False,
     ):
-        dct_patches, codes, vq_loss = self.encode(dct_patches, do_normalize=False)
+        dct_patches, codes, vq_loss = self.encode(dct_patches, do_normalize=do_normalize)
 
         dct_patches = self.decode(dct_patches)
 

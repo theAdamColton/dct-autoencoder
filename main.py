@@ -14,7 +14,7 @@ import random
 from dct_autoencoder.feature_extraction_dct_autoencoder import DCTAutoencoderFeatureExtractor
 from dct_autoencoder.patchnorm import PatchNorm
 from dct_autoencoder.util import calculate_perplexity
-from dct_autoencoder.factory import get_model
+from dct_autoencoder.factory import get_model_and_processor
 from dct_autoencoder.dataset import load_and_transform_dataset, load_preprocessed_dataset, tuple_collate
 from dct_autoencoder.dct_patches import DCTPatches, slice_dctpatches
 from dct_autoencoder.modeling_dct_autoencoder import DCTAutoencoder
@@ -387,7 +387,7 @@ def main(
 
     random.seed(seed)
 
-    autoencoder, processor = get_model(
+    autoencoder, processor = get_model_and_processor(
         model_config, device, dtype, sample_patches_beta, resume_path
     )
     max_seq_len = processor.max_seq_len

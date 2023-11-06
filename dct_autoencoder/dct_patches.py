@@ -49,6 +49,9 @@ class DCTPatches:
 
 
 def slice_dctpatches(p: DCTPatches, i: int) -> Tuple[DCTPatches, DCTPatches]:
+    """
+    slices along batch
+    """
     if i >= p.patches.shape[0]:
         return (p, None)
 

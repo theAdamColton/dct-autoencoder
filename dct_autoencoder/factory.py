@@ -1,3 +1,4 @@
+import torch
 import math
 from typing import Optional
 
@@ -30,13 +31,23 @@ def get_max_seq_length(
     return max_seq_len
 
 
-def get_model(
-    model_config: DCTAutoencoderConfig,
-    device,
-    dtype,
-    sample_patches_beta: float,
-    resume_path: Optional[str],
+def get_model_and_processor(
+    model_config: Optional[DCTAutoencoderConfig] = None,
+    device="cpu",
+    dtype=torch.float32,
+    sample_patches_beta: float = 0.02,
+    resume_path: Optional[str]=None,
 ):
+
+
+    if resume_path is not None:
+        model = DCTAutoencoder.from_pretrained(resume_path).to(dtype).to(device)
+        model_config = model.config
+        print("Loaded from ", resume_path)
+    else:
+        assert model_config is not None
+        model = DCTAutoencoder(model_config).to(dtype).to(device)
+    
     max_seq_len = get_max_seq_length(model_config, sample_patches_beta)
 
     proc = DCTAutoencoderFeatureExtractor(
@@ -47,11 +58,5 @@ def get_model(
         max_patch_w=model_config.max_patch_w,
         max_seq_len=max_seq_len,
     )
-
-    if resume_path is not None:
-        model = DCTAutoencoder.from_pretrained(resume_path).to(dtype).to(device)
-        print("Loaded from ", resume_path)
-    else:
-        model = DCTAutoencoder(model_config).to(dtype).to(device)
 
     return model, proc

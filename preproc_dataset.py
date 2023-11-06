@@ -21,9 +21,9 @@ import webdataset as wds
 import os
 from tqdm import tqdm
 
-from main import get_model, load_and_transform_dataset
+from main import get_model_and_processor, load_and_transform_dataset
 from dct_autoencoder.configuration_dct_autoencoder import DCTAutoencoderConfig
-from dct_autoencoder.factory import get_model
+from dct_autoencoder.factory import get_model_and_processor
 
 
 def main(
@@ -42,7 +42,7 @@ def main(
     if device == "cuda":
         print("Warning! CUDA FFT is known to have memory leak issues! https://github.com/pytorch/pytorch/issues/94893")
 
-    model, processor = get_model(
+    model, processor = get_model_and_processor(
         model_config, device, dtype, sample_patches_beta, resume_path
     )
     del model
@@ -52,7 +52,7 @@ def main(
 
     os.makedirs(output_dir, exist_ok=True)
     with wds.ShardWriter(output_dir + "/%06d.tar", maxsize=1e9, compress=True) as shardwriter:
-        for i, data in tqdm(enumerate(dataset)):
+        for i, data in tqdm(enumerate(dataset), total=n):
             patches, positions, channels, original_size, patch_size = data
 
             patches = patches.cpu()
