@@ -1,0 +1,15 @@
+bpython==0.24
+einops==0.7.0
+imageio==2.32.0
+jsonargparse==4.27.0
+matplotlib==3.8.1
+Pillow==10.1.0
+Pillow==10.1.0
+torch==2.1.0
+torch_dct==0.1.6
+torchvision==0.16.0
+tqdm==4.66.1
+transformers==4.35.0
+vector_quantize_pytorch==1.11.5
+webdataset==0.2.73
+x_transformers==1.24.5
