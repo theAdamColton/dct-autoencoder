@@ -2,7 +2,7 @@ import torch
 import torchvision
 from dct_autoencoder import DCTAutoencoderFeatureExtractor
 from dct_autoencoder.patchnorm import PatchNorm
-from dct_autoencoder.util import tuple_collate
+from dct_autoencoder.dataset import tuple_collate
 from dct_autoencoder.dct_patches import DCTPatches
 import random
 import os

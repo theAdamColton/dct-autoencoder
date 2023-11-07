@@ -134,6 +134,11 @@ def ycbcr_to_rgb(x: torch.Tensor):
     )
 
 
+def image_clip(im: torch.Tensor):
+    """
+    clip image to [0,1]
+    """
+    return (im - im.min()) / (im.max() - im.min())
 
 def pad_sequence(seq: List[torch.Tensor], max_seq_len):
     """

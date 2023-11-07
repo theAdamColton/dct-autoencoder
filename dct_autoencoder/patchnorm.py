@@ -39,8 +39,8 @@ class PatchNorm(nn.Module):
         patch_size: int,
         channels: int,
         eps: float = 1e-6,
-        max_val: float = 5.0,
-        min_val: float = -5.0,
+        max_val: float = 4.0,
+        min_val: float = -4.0,
     ):
         super().__init__()
         self.eps = eps

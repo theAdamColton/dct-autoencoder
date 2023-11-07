@@ -8,11 +8,9 @@ import torchvision
 from tqdm import tqdm
 from PIL import ImageDraw
 
-from torch_dct import dct_2d, idct_2d
-from dct_autoencoder.dct_patches import DCTPatches
 from dct_autoencoder.factory import get_model_and_processor
-from dct_autoencoder import DCTAutoencoder, DCTAutoencoderFeatureExtractor
 from dct_autoencoder.dataset import tuple_collate
+from dct_autoencoder.util import image_clip
 
 torch.set_grad_enabled(False)
 
@@ -27,10 +25,10 @@ def main(
     c, h, w = image.shape
     ar = h / w
     if w < h:
-        w = min(512, w)
+        w = min(768, w)
         h = int(ar * w)
     else:
-        h = min(512, h)
+        h = min(768, h)
         w = int(h / ar)
 
     image = torchvision.transforms.Resize((h, w))(image)
@@ -38,7 +36,7 @@ def main(
     image = image.to(dtype).to(device)
     _, h, w = image.shape
 
-    autoenc, proc = get_model_and_processor(resume_path=model_path, device=device, dtype=dtype)
+    autoenc, proc = get_model_and_processor(resume_path=model_path, device=device, dtype=dtype, sample_patches_beta=0.0)
 
     input_data = proc.preprocess(image)
     input_data = tuple_collate([input_data])
@@ -46,6 +44,15 @@ def main(
     batch = next(iter(proc.iter_batches(iter([input_data]))))
     batch = batch.to(device)
     input_patches = batch.patches.clone()
+
+    is_image_zero_mask = (
+        (batch.batched_image_ids[0] == 0)
+        & ~batch.key_pad_mask
+        & (
+            torch.arange(batch.patches.shape[0], device=batch.patches.device) == 0
+        ).unsqueeze(-1)
+    )
+    n_patches_image_zero = is_image_zero_mask.sum().item()
 
     res = autoenc(batch, do_normalize=True)
     codes = res["codes"]
@@ -69,9 +76,9 @@ def main(
         )
 
     images = []
-    end_n = min(batch.patches.shape[1], 60)
+    end_n = min(n_patches_image_zero, 200)
     start_n = 1
-    jmp = 1
+    jmp = 10
     for i in tqdm(range(start_n, end_n + 1, jmp)):
         masked_dct_patches = mask_and_rec(i)
 
@@ -79,11 +86,12 @@ def main(
         proc._transform_image_out = lambda x: x
         # an image of the DCT features
         image_dct_masked = proc.postprocess(masked_dct_patches)[0].cpu()
+        image_dct_masked = (image_dct_masked.abs() * 10).clip(0,1)
         proc._transform_image_out = _og_transform_out
 
         # reconstructed image with RGB pixels
         image_reconstructed = proc.postprocess(masked_dct_patches)[0].cpu()
-        image_reconstructed = image_reconstructed.clip(0,1)
+        image_reconstructed = image_clip(image_reconstructed)
 
         # ground truth image
         masked_dct_patches.patches = input_patches[:, :i, :]
@@ -98,12 +106,12 @@ def main(
         )
         im = torchvision.transforms.ToPILImage()(im)
         ImageDraw.Draw(im).text(  # Image
-            (0, 0), f"#codes: {i * autoenc.config.vq_num_codebooks:05}", (255, 100, 100)  # Coordinates  # Text  # Color
+            (0, 0), f"#codes: {i * autoenc.config.vq_num_codebooks:05}", (150, 0, 0)  # Coordinates  # Text  # Color
         )
 
         images.append(im)
 
-    total_gif_duration_ms = 10 * 1000
+    total_gif_duration_ms = 7 * 1000
     n_frames = (end_n - start_n) / jmp
     ms_per_frame = total_gif_duration_ms / n_frames
     print("saving gif")

@@ -1,4 +1,3 @@
-import torch.nn.functional as F
 import torch
 import torch.nn as nn
 
@@ -69,19 +68,13 @@ class DCTAutoencoder(PreTrainedModel):
             ff_glu=True,
             ff_no_bias=True,
             sandwich_norm=True,
-        )
-
-        self.vq_norm = nn.Sequential(
-            #                nn.LayerNorm(config.feature_dim),
-            #                nn.GELU(),
-            nn.Identity(),
+            num_memory_tokens = 4,
         )
 
         self.vq_model = LFQ(
             dim=config.feature_dim,
             num_codebooks=config.vq_num_codebooks,
             codebook_size=config.vq_codebook_size,
-            # straight_through_activation=nn.Tanh(),
         )
 
         self.decoder = Encoder(
@@ -92,6 +85,7 @@ class DCTAutoencoder(PreTrainedModel):
             ff_glu=True,
             ff_no_bias=True,
             sandwich_norm=True,
+            num_memory_tokens = 4,
         )
 
         self.proj_out = nn.Sequential(
@@ -155,7 +149,6 @@ class DCTAutoencoder(PreTrainedModel):
             dct_patches.patches, attn_mask=~dct_patches.attn_mask
         )
 
-        dct_patches.patches = self.vq_norm(dct_patches.patches)
         dct_patches.patches, codes, vq_loss = self.vq_model(dct_patches.patches)
 
         return dct_patches, codes, vq_loss

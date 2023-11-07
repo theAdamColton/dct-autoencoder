@@ -13,7 +13,7 @@ import random
 
 from dct_autoencoder.feature_extraction_dct_autoencoder import DCTAutoencoderFeatureExtractor
 from dct_autoencoder.patchnorm import PatchNorm
-from dct_autoencoder.util import calculate_perplexity
+from dct_autoencoder.util import calculate_perplexity, image_clip
 from dct_autoencoder.factory import get_model_and_processor
 from dct_autoencoder.dataset import load_and_transform_dataset, load_preprocessed_dataset, tuple_collate
 from dct_autoencoder.dct_patches import DCTPatches, slice_dctpatches
@@ -70,7 +70,7 @@ def make_image_grid(x, x_hat, filename=None, n: int = 10, max_size: int = 1024):
         for im in ims
     ]
 
-    ims = [(im - im.min()) / (im.max() - im.min()) for im in ims]
+    ims = [image_clip(im) for im in ims]
     ims = [im.clamp(0.0, 1.0) for im in ims]
 
     sizes = [im.shape for im in ims]
@@ -192,7 +192,7 @@ def train_patch_norm(
     steps: int = 20,
     rng=None,
 ):
-    train_ds = train_ds.shuffle(10000, rng=rng)
+    train_ds = train_ds.shuffle(100000, rng=rng)
     dataloader = DataLoader(
         train_ds, batch_size=batch_size, num_workers=0, collate_fn=tuple_collate
     )
@@ -251,7 +251,7 @@ def train(
 
     # ----------- Model Training --------------
     for epoch_i, epoch in enumerate(range(epochs)):
-        train_ds = train_ds.shuffle(10000, rng=rng)
+        train_ds = train_ds.shuffle(100000, rng=rng)
         dataloader = DataLoader(
             train_ds,
             batch_size=batch_size,
@@ -575,8 +575,8 @@ def main(
             grad_accumulation_steps=grad_accumulation_steps,
         )
 
-    print("done with all training")
     autoencoder.save_pretrained(OUTDIR + "/model/")
+    print("done with all training")
 
     if use_wandb:
         wandb.finish()

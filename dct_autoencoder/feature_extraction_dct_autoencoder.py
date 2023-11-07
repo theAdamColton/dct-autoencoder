@@ -134,13 +134,22 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         """
         x = rgb_to_ipt(x)
         og_dtype = x.dtype
-        return dct2(x.to(torch.float32), "ortho").to(og_dtype)
+        og_device = x.device
+        # cuda fft has a memory leak
+        x = x.float().to('cpu')
+        x = dct2(x, "ortho")
+        x = x.to(og_dtype).to(og_device)
+        return x
 
     def _transform_image_out(self, x):
         og_dtype = x.dtype
-        image = idct2(x.to(torch.float32), "ortho").to(og_dtype)
-        image = ipt_to_rgb(image)
-        return image
+        og_device = x.device
+        # cuda fft has a memory leak
+        x = x.float().to('cpu')
+        x = idct2(x, "ortho")
+        x = x.to(og_dtype).to(og_device)
+        x = ipt_to_rgb(x)
+        return x
 
     @torch.no_grad()
     def preprocess(self, im: torch.Tensor):
