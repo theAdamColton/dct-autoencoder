@@ -352,31 +352,30 @@ def train(
 
 def main(
     # specify one of the below two
+    # image_dataset_path_or_url refers to an unprocessed dataset
     image_dataset_path_or_url: str = None,
+    # preprocessed_dataset_path_or_url refers to a dataset preprocessed using
+    # ./preproc_dataset.py
     preprocessed_dataset_path_or_url: str = None,
 
-    model_config_path="./conf/patch16.json",
+    model_config_path="./conf/patch16L.json",
     resume_path: Optional[str] = None,
     device="cuda",
     dtype=torch.bfloat16,
-    batch_size: int = 32,
+    batch_size: int = 30,
     num_workers: int = 0,
     use_wandb: bool = False,
     train_norm_iters: int = 10,
     max_iters: int = 10000,
-    sample_patches_beta: float = 0.1,
-    batch_size_ft: int = 16,
-    max_iters_ft: int = 10000,
-    sample_patches_beta_ft: float = 0.01,
-    commitment_loss_weight_start: float = 5e-3,
+    # This only applies if you are not using a preprocessed dataset
+    sample_patches_beta: float = 0.02,
+    commitment_loss_weight_start: float = 1e-1,
     commitment_loss_weight_end: float = 1e-9,
     lfq_entropy_loss_start: float = 5e1,
     lfq_entropy_loss_end: float = 1e-1,
-    learning_rate: float = 1e-3,
-    learning_rate_ft: float = 5e-4,
+    learning_rate: float = 1e-4,
+    # dict of k,v where k is the name of some loss term returned by train_step
     loss_weight: dict[str, float] = {},
-    max_iters_pixel_loss: int = 5000,
-    batch_size_pixel_loss: int = 8,
     seed: int = 42,
     log_every: int = 200,
     grad_accumulation_steps: int = 1,
@@ -396,7 +395,7 @@ def main(
     autoencoder.vq_model.entropy_loss_weight = lfq_entropy_loss_start
     autoencoder.vq_model.commitment_loss_weight = commitment_loss_weight_start
 
-    warmup_steps = 50
+    warmup_steps = 100
 
     commitment_loss_weight_n = max_iters
     commitment_loss_weight_fn = get_decay_fn(
@@ -432,12 +431,10 @@ def main(
             n_params += p.nelement()
 
     run_d = dict(
-        sample_patches_beta_ft=sample_patches_beta_ft,
         sample_patches_beta=sample_patches_beta,
         max_seq_len=processor.max_seq_len,
         max_seq_len_ft=max_seq_len_ft,
         learning_rate=learning_rate,
-        learning_rate_ft=learning_rate_ft,
         commitment_loss_weight_start=commitment_loss_weight_start,
         commitment_loss_weight_end=commitment_loss_weight_end,
         commitment_loss_weight_n=commitment_loss_weight_n,
@@ -491,89 +488,25 @@ def main(
 
     optimizer = torch.optim.Adam(autoencoder.parameters(), lr=1e-9)
 
-    # This trains using shorter sequence lengths
-    if max_iters > 0:
-        autoencoder, optimizer = train(
-            autoencoder,
-            processor,
-            train_ds,
-            device=device,
-            dtype=dtype,
-            learning_rate=learning_rate,
-            batch_size=batch_size,
-            use_wandb=use_wandb,
-            warmup_steps=warmup_steps,
-            num_workers=num_workers,
-            max_steps=max_iters,
-            vq_callables=vq_callables,
-            rng=rng,
-            loss_weight=loss_weight,
-            optimizer=optimizer,
-            log_every=log_every,
-            grad_accumulation_steps=grad_accumulation_steps,
-        )
-
-    # this trains using longer sequence lengths and a smaller batch size
-    lfq_decay_fn = get_decay_fn(
-        lfq_entropy_loss_start, lfq_entropy_loss_end, max_iters_ft
+    autoencoder, optimizer = train(
+        autoencoder,
+        processor,
+        train_ds,
+        device=device,
+        dtype=dtype,
+        learning_rate=learning_rate,
+        batch_size=batch_size,
+        use_wandb=use_wandb,
+        warmup_steps=warmup_steps,
+        num_workers=num_workers,
+        max_steps=max_iters,
+        vq_callables=vq_callables,
+        rng=rng,
+        loss_weight=loss_weight,
+        optimizer=optimizer,
+        log_every=log_every,
+        grad_accumulation_steps=grad_accumulation_steps,
     )
-    commitment_loss_weight_fn = get_decay_fn(
-        commitment_loss_weight_start, commitment_loss_weight_end, max_iters_ft
-    )
-    vq_callables = [
-        lambda i: {
-            "entropy_loss_weight": lfq_decay_fn(i),
-            "commitment_loss_weight": commitment_loss_weight_fn(i),
-        }
-    ]
-    if max_iters_ft > 0:
-        print("------ft model--------")
-        processor.sample_patches_beta = sample_patches_beta_ft
-        processor.max_seq_len = max_seq_len_ft
-        processor, _ = train(
-            autoencoder,
-            processor,
-            train_ds,
-            optimizer=optimizer,
-            device=device,
-            dtype=dtype,
-            learning_rate=learning_rate_ft,
-            batch_size=batch_size_ft,
-            use_wandb=use_wandb,
-            warmup_steps=warmup_steps,
-            num_workers=num_workers,
-            max_steps=max_iters_ft,
-            vq_callables=vq_callables,
-            rng=rng,
-            loss_weight=loss_weight,
-            log_every=log_every,
-            grad_accumulation_steps=grad_accumulation_steps,
-        )
-
-    # this trains using long sequence lengths as well as pixel loss
-    if max_iters_pixel_loss > 0:
-        print("------ft model with pixel loss--------")
-        processor.sample_patches_beta = sample_patches_beta_ft
-        processor.max_seq_len = max_seq_len_ft
-        processor, _ = train(
-            autoencoder=autoencoder,
-            proc=processor,
-            train_ds=train_ds,
-            optimizer=optimizer,
-            device=device,
-            dtype=dtype,
-            learning_rate=learning_rate_ft,
-            batch_size=batch_size_pixel_loss,
-            use_wandb=use_wandb,
-            warmup_steps=warmup_steps,
-            num_workers=num_workers,
-            max_steps=max_iters_pixel_loss,
-            rng=rng,
-            loss_weight=loss_weight,
-            use_pixel_loss=True,
-            log_every=log_every,
-            grad_accumulation_steps=grad_accumulation_steps,
-        )
 
     autoencoder.save_pretrained(OUTDIR + "/model/")
     print("done with all training")
