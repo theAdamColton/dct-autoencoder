@@ -1,3 +1,4 @@
+from torch.cuda.amp import GradScaler
 from typing import Callable, List, Optional
 from tqdm import tqdm
 import torch
@@ -248,7 +249,9 @@ def train(
     loss_weight={},
 ):
     if optimizer is None:
-        optimizer = torch.optim.Adam(autoencoder.parameters(), lr=1e-9)
+        optimizer = torch.optim.Adam(autoencoder.parameters(), lr=learning_rate)
+
+    grad_scaler = GradScaler()
 
     # ----------- Model Training --------------
     for epoch_i, epoch in enumerate(range(epochs)):
@@ -269,7 +272,7 @@ def train(
                 __set_lr(optimizer, _lr)
 
             batch = batch.to(device)
-            batch.patches = batch.patches.to(dtype)
+            #batch.patches = batch.patches.to(dtype)
 
             seq_len = batch.patches.shape[1]
             batch_len = batch.patches.shape[0]
@@ -278,13 +281,14 @@ def train(
                 print("logging images ....")
                 autoencoder.eval()
                 with torch.no_grad():
-                    out = train_step(
-                        batch,
-                        autoencoder,
-                        proc,
-                        max_batch_n=n_log,
-                        decode_pixels=True,
-                    )
+                    with torch.autocast(device_type=device, dtype=dtype):
+                        out = train_step(
+                            batch,
+                            autoencoder,
+                            proc,
+                            max_batch_n=n_log,
+                            decode_pixels=True,
+                        )
                 autoencoder.train()
                 image = make_image_grid(
                     out["x"],
@@ -300,7 +304,8 @@ def train(
 
             optimizer.zero_grad()
 
-            out = train_step(batch, autoencoder, proc, decode_pixels=use_pixel_loss)
+            with torch.autocast(device_type=device, dtype=dtype):
+                out = train_step(batch, autoencoder, proc, decode_pixels=use_pixel_loss)
 
             loss = 0.0
             for k, v in out.items():
@@ -311,11 +316,13 @@ def train(
                         weight = 1.0
                     loss += v * weight
 
-            (loss / grad_accumulation_steps).backward()
+            grad_scaler.scale(loss / grad_accumulation_steps).backward()
 
             if (i + 1) % grad_accumulation_steps == 0:
+                grad_scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(autoencoder.parameters(), 1.0)
-                optimizer.step()
+                grad_scaler.step(optimizer)
+                grad_scaler.update()
 
             log_dict = dict(
                 epoch=epoch,
@@ -362,7 +369,7 @@ def main(
     model_config_path="./conf/patch16L.json",
     resume_path: Optional[str] = None,
     device="cuda",
-    dtype=torch.float16,
+    autocast_dtype:str="float16",
     batch_size: int = 30,
     num_workers: int = 0,
     use_wandb: bool = False,
@@ -381,7 +388,7 @@ def main(
     log_every: int = 200,
     grad_accumulation_steps: int = 1,
 
-    torch_compile:bool=True,
+    torch_compile:bool=False,
 ):
     model_config: DCTAutoencoderConfig = DCTAutoencoderConfig.from_json_file(
         model_config_path
@@ -389,14 +396,23 @@ def main(
 
     random.seed(seed)
 
+    if autocast_dtype == "float32":
+        dtype = torch.float32
+    elif autocast_dtype == "float16":
+        dtype = torch.float16
+    elif autocast_dtype == "bfloat16":
+        dtype = torch.bfloat16
+    else: raise ValueError(autocast_dtype)
+
     autoencoder, processor = get_model_and_processor(
         model_config, device, dtype, sample_patches_beta, resume_path
     )
+    autoencoder = autoencoder.to(torch.float32)
 
-    autoencoder = torch.compile(autoencoder)
+    if torch_compile:
+        autoencoder = torch.compile(autoencoder, mode='reduce-overhead')
 
     max_seq_len = processor.max_seq_len
-    max_seq_len_ft = processor.max_patch_h * processor.max_patch_w
 
     autoencoder.vq_model.entropy_loss_weight = lfq_entropy_loss_start
     autoencoder.vq_model.commitment_loss_weight = commitment_loss_weight_start
@@ -439,7 +455,6 @@ def main(
     run_d = dict(
         sample_patches_beta=sample_patches_beta,
         max_seq_len=processor.max_seq_len,
-        max_seq_len_ft=max_seq_len_ft,
         learning_rate=learning_rate,
         commitment_loss_weight_start=commitment_loss_weight_start,
         commitment_loss_weight_end=commitment_loss_weight_end,

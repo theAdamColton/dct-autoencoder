@@ -56,7 +56,7 @@ class DCTAutoencoder(PreTrainedModel):
 
         self.to_patch_embedding = nn.Sequential(
             nn.Linear(patch_dim, config.feature_dim, bias=False),
-            nn.LayerNorm(config.feature_dim),
+            nn.LayerNorm(config.feature_dim, eps=1e-4),
         )
 
         self.encoder = Encoder(
@@ -88,7 +88,7 @@ class DCTAutoencoder(PreTrainedModel):
         )
 
         self.proj_out = nn.Sequential(
-            nn.LayerNorm(config.feature_dim),
+            nn.LayerNorm(config.feature_dim, eps=1e-4),
             nn.Linear(config.feature_dim, patch_dim, bias=False),
         )
 

@@ -147,8 +147,8 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         # cuda fft has a memory leak
         x = x.float().to('cpu')
         x = idct2(x, "ortho")
-        x = x.to(og_dtype).to(og_device)
         x = ipt_to_rgb(x)
+        x = x.to(og_dtype).to(og_device)
         return x
 
     @torch.no_grad()
