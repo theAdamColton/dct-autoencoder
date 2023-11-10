@@ -33,26 +33,25 @@ class DCTAutoencoder(PreTrainedModel):
         )
 
         patch_dim = config.patch_size**2
-        max_n_patches = config.max_patch_h * config.max_patch_w
 
         self.encoder_pos_embed_channel = nn.Parameter(
             torch.randn(self.config.image_channels, self.config.feature_dim)
         )
         self.encoder_pos_embed_height = nn.Parameter(
-            torch.randn(max_n_patches, self.config.feature_dim)
+            torch.randn(config.max_patch_h, self.config.feature_dim)
         )
         self.encoder_pos_embed_width = nn.Parameter(
-            torch.randn(max_n_patches, self.config.feature_dim)
+            torch.randn(config.max_patch_w, self.config.feature_dim)
         )
 
         self.decoder_pos_embed_channel = nn.Parameter(
             torch.randn(self.config.image_channels, config.feature_dim)
         )
         self.decoder_pos_embed_height = nn.Parameter(
-            torch.randn(max_n_patches, config.feature_dim)
+            torch.randn(config.max_patch_h, config.feature_dim)
         )
         self.decoder_pos_embed_width = nn.Parameter(
-            torch.randn(max_n_patches, config.feature_dim)
+            torch.randn(config.max_patch_w, config.feature_dim)
         )
 
         self.to_patch_embedding = nn.Sequential(

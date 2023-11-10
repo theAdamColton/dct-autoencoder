@@ -16,7 +16,6 @@ There are some variables which can't be adjusted between preprocessing datasets:
     You can't change the channel weights or magnitude weight
 """
 import torch
-import random
 import webdataset as wds
 import os
 from tqdm import tqdm
@@ -46,6 +45,8 @@ def main(
         model_config, device, dtype, sample_patches_beta, resume_path
     )
     del model
+
+    print("Max sequence length:", processor.max_seq_len)
 
     dataset = load_and_transform_dataset(image_dataset_path_or_url, processor, device=device)
     dataset = dataset.with_length(n)

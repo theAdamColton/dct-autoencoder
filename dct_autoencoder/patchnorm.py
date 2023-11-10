@@ -38,7 +38,7 @@ class PatchNorm(nn.Module):
         max_patch_w: int,
         patch_size: int,
         channels: int,
-        eps: float = 1e-6,
+        eps: float = 1e-4,
         max_val: float = 4.0,
         min_val: float = -4.0,
     ):
@@ -57,6 +57,7 @@ class PatchNorm(nn.Module):
             ),
             requires_grad=False,
         )
+
         self.median = nn.Parameter(
             torch.zeros(channels, max_patch_h, max_patch_w, patch_size**2),
             requires_grad=False,
@@ -143,6 +144,7 @@ class PatchNorm(nn.Module):
                 ) / (self.n + batch_n).clamp(1).unsqueeze(-1)
 
                 self.n.data = self.n + batch_n
+
 
         patches = (patches - self.median[pos_channels, pos_h, pos_w]) / (
             self.b[pos_channels, pos_h, pos_w] + self.eps

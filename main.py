@@ -147,7 +147,7 @@ def train_step(
     ][mask]
     res["rec_loss_unnormalized"] = (
         _b * (output_patches.patches[mask] - batch.patches[mask])
-    ).abs().sum() / _b.nelement()
+    ).abs().mean()
 
     with torch.no_grad():
         res["perplexity"] = calculate_perplexity(
@@ -197,7 +197,8 @@ def train_patch_norm(
         train_ds, batch_size=batch_size, num_workers=0, collate_fn=tuple_collate
     )
 
-    patch_norm = patch_norm.to(torch.float32).to(device)
+    patch_norm = patch_norm.to(torch.float32).to(device).train()
+    patch_norm.frozen = False
 
     for i, batch in enumerate(tqdm(proc.iter_batches(iter(dataloader), batch_size))):
         if i + 1 > steps:
@@ -361,7 +362,7 @@ def main(
     model_config_path="./conf/patch16L.json",
     resume_path: Optional[str] = None,
     device="cuda",
-    dtype=torch.bfloat16,
+    dtype=torch.float16,
     batch_size: int = 30,
     num_workers: int = 0,
     use_wandb: bool = False,
@@ -379,6 +380,8 @@ def main(
     seed: int = 42,
     log_every: int = 200,
     grad_accumulation_steps: int = 1,
+
+    torch_compile:bool=True,
 ):
     model_config: DCTAutoencoderConfig = DCTAutoencoderConfig.from_json_file(
         model_config_path
@@ -389,6 +392,9 @@ def main(
     autoencoder, processor = get_model_and_processor(
         model_config, device, dtype, sample_patches_beta, resume_path
     )
+
+    autoencoder = torch.compile(autoencoder)
+
     max_seq_len = processor.max_seq_len
     max_seq_len_ft = processor.max_patch_h * processor.max_patch_w
 
@@ -461,11 +467,11 @@ def main(
         # resets the norm
         if resume_path is not None:
             autoencoder.patchnorm = PatchNorm(
-                autoencoder.config.max_patch_h,
-                autoencoder.config.max_patch_w,
-                autoencoder.config.patch_size,
-                autoencoder.config.image_channels,
-            )
+                model_config.max_patch_h,
+                model_config.max_patch_w,
+                model_config.patch_size,
+                model_config.image_channels,
+            ).train()
 
         print("training norm")
         processor.sample_patches_beta = 0.0
@@ -485,6 +491,7 @@ def main(
         print("done training norm")
     else:
         autoencoder.patchnorm.frozen = True
+
 
     optimizer = torch.optim.Adam(autoencoder.parameters(), lr=1e-9)
 

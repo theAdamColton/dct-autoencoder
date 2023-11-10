@@ -43,7 +43,7 @@ def get_model_and_processor(
 
 
     if resume_path is not None:
-        model = DCTAutoencoder.from_pretrained(resume_path).to(dtype).to(device)
+        model = DCTAutoencoder.from_pretrained(resume_path, ignore_mismatched_sizes=True).to(dtype).to(device)
         model_config = model.config
         print("Loaded from ", resume_path)
     else:
