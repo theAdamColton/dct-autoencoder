@@ -410,7 +410,7 @@ def main(
     autoencoder = autoencoder.to(torch.float32)
 
     if torch_compile:
-        autoencoder = torch.compile(autoencoder, mode='reduce-overhead')
+        autoencoder = torch.compile(autoencoder)
 
     max_seq_len = processor.max_seq_len
 
