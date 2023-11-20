@@ -9,7 +9,7 @@ from tqdm import tqdm
 from PIL import ImageDraw
 
 from dct_autoencoder.factory import get_model_and_processor
-from dct_autoencoder.dataset import tuple_collate
+from dct_autoencoder.dataset import dict_collate, tuple_collate
 from dct_autoencoder.util import image_clip
 
 torch.set_grad_enabled(False)
@@ -39,7 +39,7 @@ def main(
     autoenc, proc = get_model_and_processor(resume_path=model_path, device=device, dtype=dtype, sample_patches_beta=0.0)
 
     input_data = proc.preprocess(image)
-    input_data = tuple_collate([input_data])
+    input_data = dict_collate([input_data])
 
     batch = next(iter(proc.iter_batches(iter([input_data]))))
     batch = batch.to(device)
@@ -76,9 +76,9 @@ def main(
         )
 
     images = []
-    end_n = min(n_patches_image_zero, 256)
+    end_n = min(n_patches_image_zero, 16)
     start_n = 1
-    jmp = 10
+    jmp = 1
     for i in tqdm(range(start_n, end_n + 1, jmp)):
         masked_dct_patches = mask_and_rec(i)
 

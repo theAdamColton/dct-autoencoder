@@ -69,7 +69,7 @@ def slice_dctpatches(p: DCTPatches, i: int) -> Tuple[DCTPatches, DCTPatches]:
             p.patch_positions[:i],
             p.patch_sizes[:n_images_p1],
             p.original_sizes[:n_images_p1],
-            {k:v[:n_images_p1] for k,v in p._data} if p._data is not None else None,
+            {k:v[:n_images_p1] for k,v in p._data.items()} if p._data is not None else None,
         ),
         DCTPatches(
             p.patches[i:],
@@ -80,7 +80,7 @@ def slice_dctpatches(p: DCTPatches, i: int) -> Tuple[DCTPatches, DCTPatches]:
             p.patch_positions[i:],
             p.patch_sizes[n_images_p1:],
             p.original_sizes[n_images_p1:],
-            {k:v[n_images_p1:] for k,v in p._data} if p._data is not None else None,
+            {k:v[n_images_p1:] for k,v in p._data.items()} if p._data is not None else None,
         ),
     )
 

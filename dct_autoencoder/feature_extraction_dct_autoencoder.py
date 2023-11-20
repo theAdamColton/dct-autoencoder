@@ -227,8 +227,6 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
                     state.group = []
                     state.group_pos = []
                     state.group_channels = []
-                    state.groups_datas.append(state.group_data)
-                    state.group_data = []
 
             cur_batch_size = len(state.groups)
 

@@ -30,7 +30,7 @@ def load_preprocessed_dataset(
     ):
     dataset = wds.WebDataset(dataset_url, handler=wds.handlers.warn_and_continue) \
             .decode(partial=True) \
-            .to_tuple("patches.pth", "positions.pth", "channels.pth", "original_size.pyd", "patch_size.pyd")
+            .map(lambda row: dict(patches=row["patches.pth"], positions=row["positions.pth"], channels=row["channels.pth"], original_sizes=row["original_size.pyd"], patch_sizes=row["patch_size.pyd"]))
     return dataset
 
 def load_and_transform_dataset(
