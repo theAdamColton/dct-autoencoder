@@ -19,7 +19,7 @@ def get_max_seq_length(
     # we pick x s.t.
     # .9 = 1-e^(-beta*x)
     # - ln(0.1) / beta = x
-    if sample_patches_beta == 0:
+    if sample_patches_beta <= 0:
         return  model_config.max_patch_h* model_config.max_patch_w* model_config.image_channels
 
     max_seq_len = round(-1 * math.log(1 - cdf_p) / sample_patches_beta)

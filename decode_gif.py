@@ -18,17 +18,17 @@ torch.set_grad_enabled(False)
 def main(
     model_path: str,
     device="cuda",
-    dtype=torch.bfloat16,
-    image_path: str = "images/holygrail.jpg",
+    dtype=torch.float16,
+    image_path: str = "images/bold.jpg",
 ):
     image = torchvision.io.read_image(image_path) / 255
     c, h, w = image.shape
     ar = h / w
     if w < h:
-        w = min(768, w)
+        w = min(1024, w)
         h = int(ar * w)
     else:
-        h = min(768, h)
+        h = min(1024, h)
         w = int(h / ar)
 
     image = torchvision.transforms.Resize((h, w))(image)
@@ -76,7 +76,7 @@ def main(
         )
 
     images = []
-    end_n = min(n_patches_image_zero, 200)
+    end_n = min(n_patches_image_zero, 256)
     start_n = 1
     jmp = 10
     for i in tqdm(range(start_n, end_n + 1, jmp)):

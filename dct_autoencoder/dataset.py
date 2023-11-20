@@ -1,9 +1,19 @@
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 from torchvision import transforms
 import webdataset as wds
 import json
 
 from .feature_extraction_dct_autoencoder import DCTAutoencoderFeatureExtractor
+
+def dict_collate(x: List[Dict]):
+    assert len(x) > 0
+    columns = x[0].keys()
+    column_dicts = {k:list() for k in columns}
+    for row in x:
+        for k in columns:
+            column_dicts[k].append(row[k])
+    return column_dicts
+
 
 def tuple_collate(x: List[Tuple]):
     assert len(x) > 0

@@ -16,7 +16,7 @@ from dct_autoencoder.feature_extraction_dct_autoencoder import DCTAutoencoderFea
 from dct_autoencoder.patchnorm import PatchNorm
 from dct_autoencoder.util import calculate_perplexity, image_clip
 from dct_autoencoder.factory import get_model_and_processor
-from dct_autoencoder.dataset import load_and_transform_dataset, load_preprocessed_dataset, tuple_collate
+from dct_autoencoder.dataset import dict_collate, load_and_transform_dataset, load_preprocessed_dataset, tuple_collate
 from dct_autoencoder.dct_patches import DCTPatches, slice_dctpatches
 from dct_autoencoder.modeling_dct_autoencoder import DCTAutoencoder
 from dct_autoencoder.configuration_dct_autoencoder import DCTAutoencoderConfig
@@ -195,7 +195,7 @@ def train_patch_norm(
 ):
     train_ds = train_ds.shuffle(100000, rng=rng)
     dataloader = DataLoader(
-        train_ds, batch_size=batch_size, num_workers=0, collate_fn=tuple_collate
+        train_ds, batch_size=batch_size, num_workers=0, collate_fn=dict_collate
     )
 
     patch_norm = patch_norm.to(torch.float32).to(device).train()
@@ -260,7 +260,7 @@ def train(
             train_ds,
             batch_size=batch_size,
             num_workers=num_workers,
-            collate_fn=tuple_collate,
+            collate_fn=dict_collate,
         )
         # list of columns, or None
         for i, batch in enumerate(

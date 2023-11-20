@@ -70,7 +70,7 @@ v
 """
 
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 from functools import partial
 from einops import rearrange
 import torch
@@ -168,7 +168,13 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
 
         patches, pos, channels = self._patch_image(im)
 
-        return patches, pos, channels, original_size, patch_size
+        return dict(
+                patches=patches,
+                positions=pos,
+                channels=channels,
+                original_sizes=original_size,
+                patch_sizes=patch_size
+                )
 
     @torch.no_grad()
     def iter_batches(self, dataloader, batch_size: Optional[int] = None):
@@ -179,13 +185,21 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         state = None
         cum_original_sizes = []
         cum_patch_sizes = []
+        # dict of lists
+        cum_data = {}
         while True:
             try:
-                [patches, positions, channels, original_sizes, patch_sizes] = next(
-                    dataloader
-                )
+                dict_data = next(dataloader)
             except StopIteration:
                 return
+
+            patches = dict_data['patches']
+            positions = dict_data['positions']
+            channels=dict_data['channels']
+            original_sizes = dict_data['original_sizes']
+            patch_sizes = dict_data['patch_sizes']
+            misc_data = {k:v for k,v in dict_data.items() if k not in {'patches', 'positions', 'channels', 'original_sizes', 'patch_sizes'}}
+
 
             # keeps on cpu, as to not waste gpu space
             patches = [p.to("cpu") for p in patches]
@@ -194,6 +208,10 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
 
             cum_original_sizes = cum_original_sizes + original_sizes
             cum_patch_sizes = cum_patch_sizes + patch_sizes
+            for k,v in misc_data.items():
+                if cum_data.get(k) is None:
+                    cum_data[k] = []
+                cum_data[k].extend(v)
 
             state = self._group_patches_by_max_seq_len(
                 patches, positions, channels, state
@@ -209,6 +227,8 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
                     state.group = []
                     state.group_pos = []
                     state.group_channels = []
+                    state.groups_datas.append(state.group_data)
+                    state.group_data = []
 
             cur_batch_size = len(state.groups)
 
@@ -223,6 +243,8 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
                     group_channels=state.group_channels,
                     seq_len=state.seq_len,
                 )
+
+                # the state that is about to be collated and returned
                 state = GroupPatchesState(
                     groups=state.groups[:batch_size],
                     groups_pos=state.groups_pos[:batch_size],
@@ -237,8 +259,10 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
 
                 new_original_sizes = cum_original_sizes[n_items_in_batch:]
                 new_patch_sizes = cum_patch_sizes[n_items_in_batch:]
+                new_cum_data = {k: v[n_items_in_batch:] for k,v in cum_data.items()}
                 cum_original_sizes = cum_original_sizes[:n_items_in_batch]
                 cum_patch_sizes = cum_patch_sizes[:n_items_in_batch]
+                cum_data = {k: v[:n_items_in_batch] for k,v in cum_data.items()}
 
                 batch = self._batch_groups(
                     state.groups,
@@ -246,6 +270,7 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
                     state.groups_channels,
                     original_sizes=cum_original_sizes,
                     patch_sizes=cum_patch_sizes,
+                    _data = cum_data,
                 )
 
                 if batch_size is not None:
@@ -258,6 +283,7 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
 
                 cum_patch_sizes = new_patch_sizes
                 cum_original_sizes = new_original_sizes
+                cum_data = new_cum_data
                 state = new_state
 
                 yield batch
