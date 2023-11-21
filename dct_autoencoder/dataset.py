@@ -42,7 +42,7 @@ def load_and_transform_dataset(
     returns a dataset that is an iterable over whatever the
     dct_processor.preprocess returns
     """
-    min_res = dct_processor.patch_size
+    min_res = dct_processor.patch_size * 2
 
     def filter_res(x):
         h, w = x["json"]["height"], x["json"]["width"]

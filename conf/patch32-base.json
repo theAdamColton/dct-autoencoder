@@ -1,0 +1,11 @@
+{
+  "feature_dim": 1024,
+  "image_channels": 3,
+  "max_patch_h": 16,
+  "max_patch_w": 16,
+  "n_attention_heads": 8,
+  "n_layers": 4,
+  "patch_size": 32,
+  "vq_codebook_size": 8192,
+  "vq_num_codebooks": 16
+}

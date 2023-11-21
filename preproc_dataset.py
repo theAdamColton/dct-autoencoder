@@ -29,12 +29,12 @@ def main(
     image_dataset_path_or_url: str = None,
     model_config_path="./conf/patch16L.json",
     output_dir: str = None,
-    resume_path: str = None,
     device="cpu",
     dtype=torch.bfloat16,
     sample_patches_beta: float = 0.02,
     # one million
     n: int = 1000000,
+    seed:int=42,
 ):
     model_config: DCTAutoencoderConfig = DCTAutoencoderConfig.from_json_file(model_config_path)
 
@@ -42,19 +42,32 @@ def main(
         print("Warning! CUDA FFT is known to have memory leak issues! https://github.com/pytorch/pytorch/issues/94893")
 
     model, processor = get_model_and_processor(
-        model_config, device, dtype, sample_patches_beta, resume_path
+        model_config, device, dtype, sample_patches_beta, 
     )
     del model
 
     print("Max sequence length:", processor.max_seq_len)
 
+    min_res = processor.patch_size
+
+    def filter_res(x):
+        h, w = x["json"]["height"], x["json"]["width"]
+        if h is None or w is None:
+            return False
+        return False if h < min_res or w < min_res else True
+
     dataset = load_and_transform_dataset(image_dataset_path_or_url, processor, device=device)
-    dataset = dataset.with_length(n)
+    dataset = dataset.with_length(n).shuffle(seed)
+
 
     os.makedirs(output_dir, exist_ok=True)
     with wds.ShardWriter(output_dir + "/%06d.tar", maxsize=1e9, compress=True) as shardwriter:
         for i, data in tqdm(enumerate(dataset), total=n):
-            patches, positions, channels, original_size, patch_size = data
+            patches = data['patches']
+            positions = data['positions']
+            channels = data['channels']
+            original_size = data['original_sizes']
+            patch_size = data['patch_sizes']
 
             patches = patches.cpu()
             positions = positions.cpu()

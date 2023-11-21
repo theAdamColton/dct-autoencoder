@@ -7,5 +7,5 @@
   "n_layers": 15,
   "patch_size": 16,
   "vq_codebook_size": 8192,
-  "vq_num_codebooks": 32
+  "vq_num_codebooks": 8
 }

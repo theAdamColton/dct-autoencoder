@@ -468,6 +468,8 @@ def main(
         n_attention_heads=model_config.n_attention_heads,
         grad_accumulation_steps=grad_accumulation_steps,
         patch_size=model_config.patch_size,
+        vq_num_codebooks=model_config.vq_num_codebooks,
+        vq_codebook_size=model_config.vq_codebook_size,
         **loss_weight,
     )
 
