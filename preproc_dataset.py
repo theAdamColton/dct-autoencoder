@@ -27,10 +27,10 @@ from dct_autoencoder.factory import get_model_and_processor
 
 def main(
     image_dataset_path_or_url: str = None,
-    model_config_path="./conf/patch16L.json",
+    model_config_path="./conf/patch32-large.json",
     output_dir: str = None,
     device="cpu",
-    dtype=torch.bfloat16,
+    dtype=torch.float16,
     sample_patches_beta: float = 0.02,
     # one million
     n: int = 1000000,

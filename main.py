@@ -1,4 +1,5 @@
 from torch.cuda.amp import GradScaler
+import gc
 from typing import Callable, List, Optional
 from tqdm import tqdm
 import torch
@@ -16,8 +17,8 @@ from dct_autoencoder.feature_extraction_dct_autoencoder import DCTAutoencoderFea
 from dct_autoencoder.patchnorm import PatchNorm
 from dct_autoencoder.util import calculate_perplexity, image_clip
 from dct_autoencoder.factory import get_model_and_processor
-from dct_autoencoder.dataset import dict_collate, load_and_transform_dataset, load_preprocessed_dataset, tuple_collate
-from dct_autoencoder.dct_patches import DCTPatches, slice_dctpatches
+from dct_autoencoder.dataset import dict_collate, load_and_transform_dataset, load_preprocessed_dataset
+from dct_autoencoder.dct_patches import DCTPatches
 from dct_autoencoder.modeling_dct_autoencoder import DCTAutoencoder
 from dct_autoencoder.configuration_dct_autoencoder import DCTAutoencoderConfig
 
@@ -38,7 +39,7 @@ def get_loss_dict(d):
     for k, v in d.items():
         if "loss" in k:
             if isinstance(v, torch.Tensor):
-                o[k] = v.item()
+                o[k] = round(v.item(), 5)
             else:
                 o[k] = v
     return o
@@ -81,7 +82,7 @@ def make_image_grid(x, x_hat, filename=None, n: int = 10, max_size: int = 1024):
     ims = [F.pad(im, (w - im.shape[2], 0, h - im.shape[1], 0)) for im in ims]
 
     im = torchvision.utils.make_grid(ims, 2, normalize=False, scale_each=False)
-    im = transforms.functional.to_pil_image(im.cpu().float())
+    im = transforms.functional.to_pil_image(im.detach().cpu().float())
 
     if filename:
         im.save(filename)
@@ -90,40 +91,13 @@ def make_image_grid(x, x_hat, filename=None, n: int = 10, max_size: int = 1024):
     return im
 
 
-def get_loss_weight_in_patch(h, w, decay: float, device, dtype, eps=1e-2):
-    _arange_h = torch.arange(h, device=device, dtype=dtype)
-    _arange_w = torch.arange(w, device=device, dtype=dtype)
-    _h_ind, _w_ind = torch.meshgrid(_arange_h, _arange_w, indexing="ij")
-    in_patch_dist = _h_ind + _w_ind
-    # exponential decay
-    weight = torch.exp(-decay * in_patch_dist) + eps
-    return weight
-
-
-def get_loss_weight_between_patches(h_positions, w_positions, decay, eps=1e-2):
-    weight = h_positions + w_positions
-    # exponential decay
-    weight = torch.exp(-decay * weight) + eps
-    return weight
-
-
-def weighted_mse_loss(x, y, patch_pixel_weights, patch_position_weights):
-    loss = (x - y) ** 2
-    loss = (loss * patch_pixel_weights.unsqueeze(0)).mean()
-    loss = (loss * patch_position_weights).mean()
-    return loss
-
-
 def train_step(
     batch: DCTPatches,
     autoencoder: DCTAutoencoder,
     proc: DCTAutoencoderFeatureExtractor,
-    max_batch_n=None,
     decode_pixels=False,
 ):
     assert autoencoder.patchnorm.frozen
-    if max_batch_n is not None:
-        batch = slice_dctpatches(batch, max_batch_n)[0]
 
     # the batch is normalized
     batch = autoencoder._normalize(batch)
@@ -140,27 +114,19 @@ def train_step(
     # l1 is used because dct features are usually considered laplacian distributed
     res["rec_loss"] = F.l1_loss(output_patches.patches[mask], batch.patches[mask])
 
-    # l1 loss between unnormalized features
-    _b = autoencoder.patchnorm.b[
-        output_patches.patch_channels,
-        output_patches.h_indices,
-        output_patches.w_indices,
-    ][mask]
-    res["rec_loss_unnormalized"] = (
-        _b * (output_patches.patches[mask] - batch.patches[mask])
-    ).abs().mean()
-
     with torch.no_grad():
         res["perplexity"] = calculate_perplexity(
             res["codes"][mask], autoencoder.config.vq_codebook_size
         )
 
-    if decode_pixels:
-        # inverse normalization for input patches
-        batch = autoencoder._inv_normalize(batch)
-        # inverse normalization for output patches
-        output_patches = autoencoder._inv_normalize(output_patches)
+    # inverse normalization for input patches
+    batch = autoencoder._inv_normalize(batch)
+    # inverse normalization for output patches
+    output_patches = autoencoder._inv_normalize(output_patches)
 
+    res["rec_loss_unnormalized"] = F.l1_loss(output_patches.patches[mask], batch.patches[mask])
+
+    if decode_pixels:
         # un-patchifies the patches, and converts from dct to pixels
         images_hat = proc.postprocess(output_patches)
         images = proc.postprocess(batch)
@@ -229,12 +195,12 @@ def train(
     autoencoder: DCTAutoencoder,
     proc: DCTAutoencoderFeatureExtractor,
     train_ds,
-    optimizer=None,
+    optimizer,
     batch_size: int = 32,
     learning_rate=3e-4,
     epochs: int = 1,
     device="cuda",
-    dtype=torch.bfloat16,
+    dtype=torch.float16,
     log_every=200,
     n_log: int = 10,
     max_steps: int = 1000000,
@@ -248,9 +214,6 @@ def train(
     use_pixel_loss=False,
     loss_weight={},
 ):
-    if optimizer is None:
-        optimizer = torch.optim.Adam(autoencoder.parameters(), lr=learning_rate)
-
     grad_scaler = GradScaler()
 
     # ----------- Model Training --------------
@@ -272,7 +235,6 @@ def train(
                 __set_lr(optimizer, _lr)
 
             batch = batch.to(device)
-            #batch.patches = batch.patches.to(dtype)
 
             seq_len = batch.patches.shape[1]
             batch_len = batch.patches.shape[0]
@@ -280,13 +242,12 @@ def train(
             if i % log_every == 0:
                 print("logging images ....")
                 autoencoder.eval()
-                with torch.no_grad():
+                with torch.inference_mode():
                     with torch.autocast(device_type=device, dtype=dtype):
                         out = train_step(
                             batch,
                             autoencoder,
                             proc,
-                            max_batch_n=n_log,
                             decode_pixels=True,
                         )
                 autoencoder.train()
@@ -314,7 +275,7 @@ def train(
                         weight = loss_weight[k]
                     else:
                         weight = 1.0
-                    loss += v * weight
+                    loss = loss + v * weight
 
             grad_scaler.scale(loss / grad_accumulation_steps).backward()
 
@@ -366,11 +327,11 @@ def main(
     # ./preproc_dataset.py
     preprocessed_dataset_path_or_url: str = None,
 
-    model_config_path="./conf/patch16L.json",
+    model_config_path="./conf/patch32-large.json",
     resume_path: Optional[str] = None,
     device="cuda",
     autocast_dtype:str="float16",
-    batch_size: int = 30,
+    batch_size: int = 32,
     num_workers: int = 0,
     use_wandb: bool = False,
     train_norm_iters: int = 10,
@@ -407,6 +368,7 @@ def main(
     autoencoder, processor = get_model_and_processor(
         model_config, device, dtype, sample_patches_beta, resume_path
     )
+    # train at mixed precision
     autoencoder = autoencoder.to(torch.float32)
 
     if torch_compile:
@@ -448,8 +410,8 @@ def main(
         train_ds = load_preprocessed_dataset(preprocessed_dataset_path_or_url)
 
     n_params = 0
-    for n, p in autoencoder.named_parameters():
-        if "patchnorm" not in n:
+    for p in autoencoder.parameters():
+        if p.requires_grad:
             n_params += p.nelement()
 
     run_d = dict(
@@ -464,8 +426,8 @@ def main(
         lfq_entropy_loss_start=lfq_entropy_loss_start,
         lfq_entropy_loss_end=lfq_entropy_loss_end,
         lfq_entropy_loss_n=lfq_entropy_loss_n,
-        feature_dim=model_config.feature_dim,
-        n_attention_heads=model_config.n_attention_heads,
+        encoder_config=model_config.encoder_config,
+        decoder_config=model_config.decoder_config,
         grad_accumulation_steps=grad_accumulation_steps,
         patch_size=model_config.patch_size,
         vq_num_codebooks=model_config.vq_num_codebooks,
@@ -481,15 +443,6 @@ def main(
 
     # ----------- Norm Training ---------------
     if train_norm_iters > 0:
-        # resets the norm
-        if resume_path is not None:
-            autoencoder.patchnorm = PatchNorm(
-                model_config.max_patch_h,
-                model_config.max_patch_w,
-                model_config.patch_size,
-                model_config.image_channels,
-            ).train()
-
         print("training norm")
         processor.sample_patches_beta = 0.0
         processor.max_seq_len = model_config.max_patch_h * model_config.max_patch_w * 3
@@ -509,13 +462,13 @@ def main(
     else:
         autoencoder.patchnorm.frozen = True
 
-
-    optimizer = torch.optim.Adam(autoencoder.parameters(), lr=1e-9)
+    optimizer = torch.optim.AdamW(autoencoder.parameters(), lr=1e-9)
 
     autoencoder, optimizer = train(
         autoencoder,
         processor,
         train_ds,
+        optimizer=optimizer,
         device=device,
         dtype=dtype,
         learning_rate=learning_rate,
@@ -527,7 +480,6 @@ def main(
         vq_callables=vq_callables,
         rng=rng,
         loss_weight=loss_weight,
-        optimizer=optimizer,
         log_every=log_every,
         grad_accumulation_steps=grad_accumulation_steps,
     )

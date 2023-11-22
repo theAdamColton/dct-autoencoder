@@ -12,8 +12,6 @@ from dct_autoencoder.factory import get_model_and_processor
 from dct_autoencoder.dataset import dict_collate, tuple_collate
 from dct_autoencoder.util import image_clip
 
-torch.set_grad_enabled(False)
-
 
 def main(
     model_path: str,
@@ -54,7 +52,9 @@ def main(
     )
     n_patches_image_zero = is_image_zero_mask.sum().item()
 
-    res = autoenc(batch, do_normalize=True)
+    with torch.inference_mode():
+        res = autoenc(batch, do_normalize=True)
+
     codes = res["codes"]
 
     def mask_and_rec(i: int):
@@ -63,17 +63,18 @@ def main(
 
         # slices along seq len
         # only works for a dct patches with a single image
-        return autoenc.decode_from_codes(
-            codes_masked,
-            do_inv_norm=True,
-            key_pad_mask=batch.key_pad_mask[:,:i],
-            attn_mask=batch.attn_mask[:,:,:i,:i],
-            batched_image_ids=batch.batched_image_ids[:,:i],
-            patch_channels=batch.patch_channels[:,:i],
-            patch_positions=batch.patch_positions[:,:i],
-            patch_sizes=batch.patch_sizes,
-            original_sizes=batch.original_sizes,
-        )
+        with torch.inference_mode():
+            return autoenc.decode_from_codes(
+                codes_masked,
+                do_inv_norm=True,
+                key_pad_mask=batch.key_pad_mask[:,:i],
+                attn_mask=batch.attn_mask[:,:,:i,:i],
+                batched_image_ids=batch.batched_image_ids[:,:i],
+                patch_channels=batch.patch_channels[:,:i],
+                patch_positions=batch.patch_positions[:,:i],
+                patch_sizes=batch.patch_sizes,
+                original_sizes=batch.original_sizes,
+            )
 
     images = []
     end_n = min(n_patches_image_zero, 16)

@@ -30,7 +30,7 @@ def load_preprocessed_dataset(
     ):
     dataset = wds.WebDataset(dataset_url, handler=wds.handlers.warn_and_continue) \
             .decode(partial=True) \
-            .map(lambda row: dict(patches=row["patches.pth"], positions=row["positions.pth"], channels=row["channels.pth"], original_sizes=row["original_size.pyd"], patch_sizes=row["patch_size.pyd"]))
+            .map(lambda row: dict(patches=row["patches.pth"], positions=row["positions.pth"], channels=row["channels.pth"], original_sizes=row["original_size.pyd"], patch_sizes=row["patch_size.pyd"]), handler=wds.handlers.warn_and_continue)
     return dataset
 
 def load_and_transform_dataset(
@@ -82,7 +82,7 @@ def load_and_transform_dataset(
         .decode("torchrgb", partial=True, handler=wds.handlers.warn_and_continue)
         .rename(pixel_values="jpg", handler=wds.handlers.warn_and_continue)
         .map_dict(pixel_values=crop)
-        .map(lambda d: dct_processor.preprocess(d['pixel_values']))#, handler=wds.handlers.warn_and_continue)
+        .map(lambda d: dct_processor.preprocess(d['pixel_values']), handler=wds.handlers.warn_and_continue)
     )
 
     return ds

@@ -1,4 +1,3 @@
-import torch.nn.functional as F
 from typing import Optional, List, Tuple
 import torch
 from torch import nn

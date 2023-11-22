@@ -1,9 +1,9 @@
 import torch
 import torch.nn as nn
 
-from x_transformers import Encoder
 from vector_quantize_pytorch import LFQ
 from transformers import PreTrainedModel
+from transformers.models.clip.modeling_clip import CLIPEncoder
 
 from dct_autoencoder.patchnorm import PatchNorm
 from .configuration_dct_autoencoder import DCTAutoencoderConfig
@@ -25,6 +25,8 @@ class DCTAutoencoder(PreTrainedModel):
 
         self.config = config
 
+        feature_dim = config.encoder_config.hidden_size
+
         self.patchnorm = PatchNorm(
             max_patch_h=config.max_patch_h,
             max_patch_w=config.max_patch_w,
@@ -35,61 +37,47 @@ class DCTAutoencoder(PreTrainedModel):
         patch_dim = config.patch_size**2
 
         self.encoder_pos_embed_channel = nn.Parameter(
-            torch.randn(self.config.image_channels, self.config.feature_dim)
+            torch.randn(self.config.image_channels, feature_dim)
         )
         self.encoder_pos_embed_height = nn.Parameter(
-            torch.randn(config.max_patch_h, self.config.feature_dim)
+            torch.randn(config.max_patch_h, feature_dim)
         )
         self.encoder_pos_embed_width = nn.Parameter(
-            torch.randn(config.max_patch_w, self.config.feature_dim)
+            torch.randn(config.max_patch_w, feature_dim)
         )
 
         self.decoder_pos_embed_channel = nn.Parameter(
-            torch.randn(self.config.image_channels, config.feature_dim)
+            torch.randn(self.config.image_channels, feature_dim)
         )
         self.decoder_pos_embed_height = nn.Parameter(
-            torch.randn(config.max_patch_h, config.feature_dim)
+            torch.randn(config.max_patch_h, feature_dim)
         )
         self.decoder_pos_embed_width = nn.Parameter(
-            torch.randn(config.max_patch_w, config.feature_dim)
+            torch.randn(config.max_patch_w, feature_dim)
         )
 
         self.to_patch_embedding = nn.Sequential(
-            nn.Linear(patch_dim, config.feature_dim, bias=False),
-            nn.LayerNorm(config.feature_dim, eps=1e-4),
+            nn.Linear(patch_dim, feature_dim, bias=False),
+            nn.LayerNorm(feature_dim, eps=1e-4),
         )
 
-        self.encoder = Encoder(
-            dim=config.feature_dim,
-            depth=config.n_layers,
-            heads=config.n_attention_heads,
-            attn_flash=True,
-            ff_glu=True,
-            ff_no_bias=True,
-            sandwich_norm=True,
-            num_memory_tokens = 4,
+        self.encoder = CLIPEncoder(
+            self.config.encoder_config
         )
 
         self.vq_model = LFQ(
-            dim=config.feature_dim,
+            dim=feature_dim,
             num_codebooks=config.vq_num_codebooks,
             codebook_size=config.vq_codebook_size,
         )
 
-        self.decoder = Encoder(
-            dim=config.feature_dim,
-            depth=config.n_layers,
-            heads=config.n_attention_heads,
-            attn_flash=True,
-            ff_glu=True,
-            ff_no_bias=True,
-            sandwich_norm=True,
-            num_memory_tokens = 4,
+        self.decoder = CLIPEncoder(
+                self.config.decoder_config
         )
 
         self.proj_out = nn.Sequential(
-            nn.LayerNorm(config.feature_dim, eps=1e-4),
-            nn.Linear(config.feature_dim, patch_dim, bias=False),
+            nn.LayerNorm(feature_dim, eps=1e-4),
+            nn.Linear(feature_dim, patch_dim, bias=False),
         )
 
     def _add_pos_embedding_decoder(self, dct_patches: DCTPatches):
@@ -144,9 +132,10 @@ class DCTAutoencoder(PreTrainedModel):
         dct_patches = self._add_pos_embedding_encoder(dct_patches)
 
         # X-Transformers uses ~attn_mask
+        # TODO Should be ~ attn mask?
         dct_patches.patches = self.encoder(
-            dct_patches.patches, attn_mask=~dct_patches.attn_mask
-        )
+            dct_patches.patches, attention_mask=dct_patches.attn_mask
+        ).last_hidden_state
 
         dct_patches.patches, codes, vq_loss = self.vq_model(dct_patches.patches)
 
@@ -169,7 +158,8 @@ class DCTAutoencoder(PreTrainedModel):
         in-place
         """
         x = self._add_pos_embedding_decoder(x)
-        x.patches = self.proj_out(self.decoder(x.patches, attn_mask=~x.attn_mask))
+        # TODO Should be ~ attn mask?
+        x.patches = self.proj_out(self.decoder(x.patches, attention_mask=x.attn_mask).last_hidden_state)
         if do_inv_norm:
             x = self._inv_normalize(x)
         return x

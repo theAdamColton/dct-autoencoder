@@ -1,0 +1,25 @@
+{
+  "decoder_config": {
+    "dropout": 0.0,
+    "hidden_size": 1024,
+    "intermediate_size": 4096,
+    "model_type": "clip_vision_model",
+    "num_attention_heads": 16,
+    "num_hidden_layers": 10
+  },
+  "encoder_config": {
+    "dropout": 0.0,
+    "hidden_size": 1024,
+    "intermediate_size": 4096,
+    "model_type": "clip_vision_model",
+    "num_attention_heads": 16,
+    "num_hidden_layers": 10
+  },
+  "image_channels": 3,
+  "max_patch_h": 32,
+  "max_patch_w": 32,
+  "patch_size": 32,
+  "transformers_version": "4.35.2",
+  "vq_codebook_size": 8192,
+  "vq_num_codebooks": 32
+}

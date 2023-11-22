@@ -50,40 +50,6 @@ class DCTPatches:
         self.patch_positions = self.patch_positions.to(what)
         return self
 
-def slice_dctpatches(p: DCTPatches, i: int) -> Tuple[DCTPatches, DCTPatches]:
-    """
-    slices along batch
-    """
-    if i >= p.patches.shape[0]:
-        return (p, None)
-
-    n_images_per_batch_element = p.batched_image_ids.max(dim=-1).values + 1
-    n_images_p1 = n_images_per_batch_element[:i].sum().item()
-    return (
-        DCTPatches(
-            p.patches[:i],
-            p.key_pad_mask[:i],
-            p.attn_mask[:i],
-            p.batched_image_ids[:i],
-            p.patch_channels[:i],
-            p.patch_positions[:i],
-            p.patch_sizes[:n_images_p1],
-            p.original_sizes[:n_images_p1],
-            {k:v[:n_images_p1] for k,v in p._data.items()} if p._data is not None else None,
-        ),
-        DCTPatches(
-            p.patches[i:],
-            p.key_pad_mask[i:],
-            p.attn_mask[i:],
-            p.batched_image_ids[i:],
-            p.patch_channels[i:],
-            p.patch_positions[i:],
-            p.patch_sizes[n_images_p1:],
-            p.original_sizes[n_images_p1:],
-            {k:v[n_images_p1:] for k,v in p._data.items()} if p._data is not None else None,
-        ),
-    )
-
 def to_dict(dct_patches: DCTPatches, codes: torch.LongTensor):
     b,s,h = codes.shape
     assert b == dct_patches.patches.shape[0]
@@ -114,8 +80,6 @@ def to_dict(dct_patches: DCTPatches, codes: torch.LongTensor):
                 }
             objs.append(obj)
     return objs
-
-
 
 
 def from_dict(obj: dict):
