@@ -146,9 +146,15 @@ class PatchNorm(nn.Module):
                 self.n.data = self.n + batch_n
 
 
-        patches = (patches - self.median[pos_channels, pos_h, pos_w]) / (
-            self.b[pos_channels, pos_h, pos_w] + self.eps
-        )
+        medians = self.median[pos_channels, pos_h, pos_w]
+        b = self.b[pos_channels, pos_h, pos_w] + self.eps
+        n = self.n[pos_channels, pos_h, pos_w]
+        mask = n < 2
+
+        medians[mask] = 0.0
+        b[mask] = 1.0
+
+        patches = (patches - medians) / b
 
         patches.clamp_(self.min_val, self.max_val)
 
@@ -159,10 +165,19 @@ class PatchNorm(nn.Module):
 
     def inverse_norm(self, dct_patches: DCTPatches) -> torch.Tensor:
         patches = dct_patches.patches
+
         pos_channels = dct_patches.patch_channels
         pos_h = dct_patches.h_indices
         pos_w = dct_patches.w_indices
-        return (
-            patches * (self.b[pos_channels, pos_h, pos_w] + self.eps)
-            + self.median[pos_channels, pos_h, pos_w]
-        )
+
+        patches.clamp_(self.min_val, self.max_val)
+
+        medians = self.median[pos_channels, pos_h, pos_w]
+        b = self.b[pos_channels, pos_h, pos_w] + self.eps
+
+        n = self.n[pos_channels, pos_h, pos_w]
+        mask = n < 2
+        medians[mask] = 0.0
+        b[mask] = 1.0
+
+        return patches * b + medians

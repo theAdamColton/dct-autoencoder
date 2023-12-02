@@ -1,5 +1,3 @@
-from torch.cuda.amp import GradScaler
-import gc
 from typing import Callable, List, Optional
 from tqdm import tqdm
 import torch
@@ -7,11 +5,11 @@ from torch.utils.data import DataLoader
 import torch.nn.functional as F
 import torchvision.transforms as transforms
 import torchvision
+from accelerate import Accelerator
 import os
 import time
 import wandb
 import random
-
 
 from dct_autoencoder.feature_extraction_dct_autoencoder import DCTAutoencoderFeatureExtractor
 from dct_autoencoder.patchnorm import PatchNorm
@@ -21,12 +19,6 @@ from dct_autoencoder.dataset import dict_collate, load_and_transform_dataset, lo
 from dct_autoencoder.dct_patches import DCTPatches
 from dct_autoencoder.modeling_dct_autoencoder import DCTAutoencoder
 from dct_autoencoder.configuration_dct_autoencoder import DCTAutoencoderConfig
-
-
-import resource
-
-rlimit = resource.getrlimit(resource.RLIMIT_NOFILE)
-resource.setrlimit(resource.RLIMIT_NOFILE, (2048, rlimit[1]))
 
 
 OUTDIR = f"out/{time.ctime()}/"
@@ -95,15 +87,18 @@ def train_step(
     batch: DCTPatches,
     autoencoder: DCTAutoencoder,
     proc: DCTAutoencoderFeatureExtractor,
+    accelerator: Optional[Accelerator]= None,
     decode_pixels=False,
 ):
     assert autoencoder.patchnorm.frozen
 
-    # the batch is normalized
-    batch = autoencoder._normalize(batch)
+    normalized_batch = autoencoder._normalize(batch.shallow_copy())
 
-    # runs the autoencoder
-    res = autoencoder(batch.shallow_copy())
+    if accelerator:
+        with accelerator.autocast():
+            res = autoencoder(normalized_batch.shallow_copy())
+    else:
+        res = autoencoder(batch.shallow_copy())
 
     output_patches = res["dct_patches"]
 
@@ -119,12 +114,14 @@ def train_step(
             res["codes"][mask], autoencoder.config.vq_codebook_size
         )
 
-    # inverse normalization for input patches
-    batch = autoencoder._inv_normalize(batch)
     # inverse normalization for output patches
     output_patches = autoencoder._inv_normalize(output_patches)
 
-    res["rec_loss_unnormalized"] = F.l1_loss(output_patches.patches[mask], batch.patches[mask])
+    # observation: We don't care about loss over the frequencies that are close
+    # to zero. We want the model to be more inclined to output zeros
+    low_freq_mask = batch.patches.abs() > 0.03
+
+    res["rec_loss_unnormalized"] = F.l1_loss(output_patches.patches[mask], (batch.patches * low_freq_mask)[mask])
 
     if decode_pixels:
         # un-patchifies the patches, and converts from dct to pixels
@@ -196,6 +193,7 @@ def train(
     proc: DCTAutoencoderFeatureExtractor,
     train_ds,
     optimizer,
+    accelerator:Accelerator,
     batch_size: int = 32,
     learning_rate=3e-4,
     epochs: int = 1,
@@ -214,7 +212,6 @@ def train(
     use_pixel_loss=False,
     loss_weight={},
 ):
-    grad_scaler = GradScaler()
 
     # ----------- Model Training --------------
     for epoch_i, epoch in enumerate(range(epochs)):
@@ -225,96 +222,96 @@ def train(
             num_workers=num_workers,
             collate_fn=dict_collate,
         )
-        # list of columns, or None
-        for i, batch in enumerate(
-            tqdm(proc.iter_batches(iter(dataloader), batch_size))
-        ):
-            # ----- LR Warmup -----
-            if epoch_i == 0 and i < warmup_steps:
-                _lr = ((i + 1) / warmup_steps) * learning_rate
-                __set_lr(optimizer, _lr)
+        with accelerator.accumulate(autoencoder):
+            # list of columns, or None
+            for i, batch in enumerate(
+                tqdm(proc.iter_batches(iter(dataloader), batch_size))
+            ):
+                # ----- LR Warmup -----
+                if epoch_i == 0 and i < warmup_steps:
+                    _lr = ((i + 1) / warmup_steps) * learning_rate
+                    __set_lr(optimizer, _lr)
 
-            batch = batch.to(device)
+                batch = batch.to(device)
 
-            seq_len = batch.patches.shape[1]
-            batch_len = batch.patches.shape[0]
+                seq_len = batch.patches.shape[1]
+                batch_len = batch.patches.shape[0]
 
-            if i % log_every == 0:
-                print("logging images ....")
-                autoencoder.eval()
-                with torch.inference_mode():
-                    with torch.autocast(device_type=device, dtype=dtype):
+                if i % log_every == 0:
+                    print("logging images ....")
+                    autoencoder.eval()
+                    with torch.inference_mode():
                         out = train_step(
                             batch,
                             autoencoder,
                             proc,
+                            accelerator,
                             decode_pixels=True,
                         )
-                autoencoder.train()
-                image = make_image_grid(
-                    out["x"],
-                    out["x_hat"],
-                    filename=f"{OUTDIR}/train image {i:04}.png",
-                    n=n_log,
+                    autoencoder.train()
+                    image = make_image_grid(
+                        out["x"],
+                        out["x_hat"],
+                        filename=f"{OUTDIR}/train image {i:04}.png",
+                        n=n_log,
+                    )
+
+                    image = wandb.Image(image)
+                    out = None
+                else:
+                    image = None
+
+                optimizer.zero_grad()
+
+                out = train_step(batch, autoencoder, proc, accelerator, decode_pixels=use_pixel_loss)
+
+                loss = 0.0
+                for k, v in out.items():
+                    if "loss" in k:
+                        if k in loss_weight:
+                            weight = loss_weight[k]
+                        else:
+                            weight = 1.0
+                        if weight != 0.0:
+                            loss = loss + v * weight
+
+                accelerator.backward(loss / grad_accumulation_steps)
+                if accelerator.sync_gradients:
+                    accelerator.clip_grad_norm_(autoencoder.parameters(), 1.0)
+                optimizer.step()
+                optimizer.zero_grad()
+
+                log_dict = dict(
+                    epoch=epoch,
+                    step=i,
+                    n_images_in_batch=len(batch.original_sizes),
+                    perplexity=out["perplexity"].item(),
+                    batch_len=batch_len,
+                    seq_len=seq_len,
+                    loss=loss.item(),
+                    **get_loss_dict(out),
                 )
+                if image:
+                    log_dict["image"] = image
 
-                image = wandb.Image(image)
-                out = None
-            else:
-                image = None
+                for fn in vq_callables:
+                    d = fn(i)
+                    for k, v in d.items():
+                        autoencoder.vq_model.__dict__[k] = v
+                        log_dict[k] = v
 
-            optimizer.zero_grad()
+                print(log_dict)
+                if use_wandb:
+                    wandb.log(
+                        {"train": log_dict},
+                    )
 
-            with torch.autocast(device_type=device, dtype=dtype):
-                out = train_step(batch, autoencoder, proc, decode_pixels=use_pixel_loss)
+                if i > max_steps:
+                    break
 
-            loss = 0.0
-            for k, v in out.items():
-                if "loss" in k:
-                    if k in loss_weight:
-                        weight = loss_weight[k]
-                    else:
-                        weight = 1.0
-                    loss = loss + v * weight
-
-            grad_scaler.scale(loss / grad_accumulation_steps).backward()
-
-            if (i + 1) % grad_accumulation_steps == 0:
-                grad_scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(autoencoder.parameters(), 1.0)
-                grad_scaler.step(optimizer)
-                grad_scaler.update()
-
-            log_dict = dict(
-                epoch=epoch,
-                step=i,
-                n_images_in_batch=len(batch.original_sizes),
-                perplexity=out["perplexity"].item(),
-                batch_len=batch_len,
-                seq_len=seq_len,
-                loss=loss.item(),
-                **get_loss_dict(out),
-            )
-            if image:
-                log_dict["image"] = image
-
-            for fn in vq_callables:
-                d = fn(i)
-                for k, v in d.items():
-                    autoencoder.vq_model.__dict__[k] = v
-                    log_dict[k] = v
-
-            print(log_dict)
-            if use_wandb:
-                wandb.log(
-                    {"train": log_dict},
-                )
-
-            if i > max_steps:
-                break
-
-            if i % save_every == 0 and i > 0:
-                autoencoder.save_pretrained(OUTDIR + "/model/")
+                if i % save_every == 0 and i > 0:
+                    accelerator.save_state(OUTDIR + "/accelerator_state/")
+                    autoencoder.save_pretrained(OUTDIR + "/model/")
 
     return autoencoder, optimizer
 
@@ -328,9 +325,10 @@ def main(
     preprocessed_dataset_path_or_url: str = None,
 
     model_config_path="./conf/patch32-large.json",
-    resume_path: Optional[str] = None,
+    model_resume_path: Optional[str] = None,
+    accelerator_resume_path: Optional[str]= None,
     device="cuda",
-    autocast_dtype:str="float16",
+    autocast_dtype:str="fp16",
     batch_size: int = 32,
     num_workers: int = 0,
     use_wandb: bool = False,
@@ -357,16 +355,14 @@ def main(
 
     random.seed(seed)
 
-    if autocast_dtype == "float32":
-        dtype = torch.float32
-    elif autocast_dtype == "float16":
+    if autocast_dtype == "fp16":
         dtype = torch.float16
-    elif autocast_dtype == "bfloat16":
+    elif autocast_dtype == "bf16":
         dtype = torch.bfloat16
     else: raise ValueError(autocast_dtype)
 
     autoencoder, processor = get_model_and_processor(
-        model_config, device, dtype, sample_patches_beta, resume_path
+        model_config, device, dtype, sample_patches_beta, model_resume_path
     )
     # train at mixed precision
     autoencoder = autoencoder.to(torch.float32)
@@ -464,12 +460,20 @@ def main(
 
     optimizer = torch.optim.AdamW(autoencoder.parameters(), lr=1e-9)
 
+    accelerator = Accelerator(gradient_accumulation_steps=grad_accumulation_steps, mixed_precision=autocast_dtype, )
+
+    autoencoder, optimizer = accelerator.prepare(autoencoder, optimizer)
+
+    if accelerator_resume_path is not None:
+        print("loading accelerator state...")
+        accelerator.load_state(accelerator_resume_path)
+
     autoencoder, optimizer = train(
         autoencoder,
         processor,
         train_ds,
         optimizer=optimizer,
-        device=device,
+        accelerator=accelerator,
         dtype=dtype,
         learning_rate=learning_rate,
         batch_size=batch_size,
@@ -481,7 +485,6 @@ def main(
         rng=rng,
         loss_weight=loss_weight,
         log_every=log_every,
-        grad_accumulation_steps=grad_accumulation_steps,
     )
 
     autoencoder.save_pretrained(OUTDIR + "/model/")
