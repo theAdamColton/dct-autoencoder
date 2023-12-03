@@ -73,6 +73,7 @@ class PatchNorm(nn.Module):
         self.max_val = max_val
         self.min_val = min_val
 
+    
     def forward(
         self,
         dct_patches: DCTPatches,
@@ -169,8 +170,6 @@ class PatchNorm(nn.Module):
         pos_channels = dct_patches.patch_channels
         pos_h = dct_patches.h_indices
         pos_w = dct_patches.w_indices
-
-        patches.clamp_(self.min_val, self.max_val)
 
         medians = self.median[pos_channels, pos_h, pos_w]
         b = self.b[pos_channels, pos_h, pos_w] + self.eps

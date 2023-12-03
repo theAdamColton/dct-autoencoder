@@ -1,4 +1,8 @@
+import os
 from typing import Optional, List, Tuple
+import torchvision.transforms as transforms
+import torchvision
+import torch.nn.functional as F
 import torch
 from torch import nn
 import matplotlib.pyplot as plt
@@ -8,6 +12,7 @@ import math
 from PIL import ImageDraw
 from PIL import ImageFont
 from einops import einsum
+from datetime import datetime
 
 
 # https://ixora.io/projects/colorblindness/color-blindness-simulation-research/
@@ -509,3 +514,66 @@ def gkern(size=256, std=None):
     gkern1d = gaussian_fn(size, std=std)
     gkern2d = torch.outer(gkern1d, gkern1d)
     return gkern2d
+
+def make_image_grid(x, x_hat, filename=None, n: int = 10, max_size: int = 1024):
+    """
+    take two lists of image tensors and display them side by side in a grid
+    """
+    ims = []
+
+    n = min(len(x), n)
+
+    for i in range(n):
+        im = x[i]
+        im_hat = x_hat[i]
+        ims.append(im)
+        ims.append(im_hat)
+
+    ims = [
+        transforms.Resize(
+            384, max_size=max_size, interpolation=transforms.InterpolationMode.BICUBIC
+        )(im)
+        for im in ims
+    ]
+
+    ims = [image_clip(im) for im in ims]
+    ims = [im.clamp(0.0, 1.0) for im in ims]
+
+    sizes = [im.shape for im in ims]
+    h = max([s[1] for s in sizes])
+    w = max([s[2] for s in sizes])
+
+    ims = [F.pad(im, (w - im.shape[2], 0, h - im.shape[1], 0)) for im in ims]
+
+    im = torchvision.utils.make_grid(ims, 2, normalize=False, scale_each=False)
+    im = transforms.functional.to_pil_image(im.detach().cpu().float())
+
+    if filename:
+        im.save(filename)
+        print("saved ", filename)
+
+    return im
+
+def get_decay_fn(start_val: float, end_value: float, n: int):
+    def fn(i: int):
+        if i > n:
+            return end_value
+        return ((n - i) / n) * start_val + (i / n) * end_value
+
+    return fn
+
+def create_output_directory():
+    # Get the current date and time
+    current_datetime = datetime.now()
+
+    # Format the date and time to create a unique directory name
+    directory_name = current_datetime.strftime("%Y-%m-%d_%H-%M-%S")
+
+    # Create the output directory
+    output_directory = os.path.join(os.getcwd(), 'out/', directory_name)
+
+    # Create the directory if it doesn't exist
+    if not os.path.exists(output_directory):
+        os.makedirs(output_directory)
+
+    return output_directory

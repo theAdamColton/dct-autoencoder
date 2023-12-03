@@ -1,13 +1,13 @@
 import torch
 import torch.nn as nn
 
-from vector_quantize_pytorch import LFQ
 from transformers import PreTrainedModel
 from transformers.models.clip.modeling_clip import CLIPEncoder
 
 from dct_autoencoder.patchnorm import PatchNorm
 from .configuration_dct_autoencoder import DCTAutoencoderConfig
 from .dct_patches import DCTPatches
+from .lfq import LFQ
 
 
 class DCTAutoencoder(PreTrainedModel):
@@ -69,6 +69,7 @@ class DCTAutoencoder(PreTrainedModel):
             dim=feature_dim,
             num_codebooks=config.vq_num_codebooks,
             codebook_size=config.vq_codebook_size,
+            #diversity_gamma = 50.0,
         )
 
         self.decoder = CLIPEncoder(

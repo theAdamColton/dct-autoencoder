@@ -1,19 +1,19 @@
 {
   "decoder_config": {
     "dropout": 0.0,
-    "hidden_size": 1024,
+    "hidden_size": 1536,
     "intermediate_size": 4096,
     "model_type": "clip_vision_model",
     "num_attention_heads": 16,
-    "num_hidden_layers": 10
+    "num_hidden_layers": 2
   },
   "encoder_config": {
     "dropout": 0.0,
-    "hidden_size": 1024,
+    "hidden_size": 1536,
     "intermediate_size": 4096,
     "model_type": "clip_vision_model",
     "num_attention_heads": 16,
-    "num_hidden_layers": 12
+    "num_hidden_layers": 2
   },
   "image_channels": 3,
   "max_patch_h": 32,
