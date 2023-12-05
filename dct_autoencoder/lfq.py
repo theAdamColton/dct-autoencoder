@@ -9,7 +9,6 @@ from vector-quantize-pytorch
 """
 
 from math import log2, ceil
-from collections import namedtuple
 
 import torch
 from torch import nn, einsum
@@ -17,12 +16,6 @@ import torch.nn.functional as F
 from torch.nn import Module
 
 from einops import rearrange, reduce, pack, unpack
-
-# constants
-
-Return = namedtuple('Return', ['quantized', 'indices', 'entropy_aux_loss'])
-
-LossBreakdown = namedtuple('LossBreakdown', ['per_sample_entropy', 'batch_entropy', 'commitment'])
 
 # helper functions
 
@@ -41,21 +34,50 @@ def pack_one(t, pattern):
 def unpack_one(t, ps, pattern):
     return unpack(t, ps, pattern)[0]
 
-# distance
+def mult_along_first_dims(x, y):
+    # returns x * y elementwise
+    ndim_to_expand = x.ndim - y.ndim
+    return x * y[..., *[None for _ in range(ndim_to_expand)]]
 
-def euclidean_distance_squared(x, y):
-    x2 = reduce(x ** 2, '... n d -> ... n', 'sum')
-    y2 = reduce(y ** 2, 'n d -> n', 'sum')
-    xy = einsum('... i d, j d -> ... i j', x, y) * -2
-    return rearrange(x2, '... i -> ... i 1') + y2 + xy
+def masked_mean(x, m, dim=None):
+    # takes the mean of the elements of x that are not masked
+    # m is 1.0 where padding is
+    x = mult_along_first_dims(x, ~m)
+    x = x / (~m).sum()
+    if dim is None:
+        return x.sum()
+    else:
+        return x.sum(dim=dim)
 
 # entropy
 
-def log(t, eps = 1e-4):
-    return t.clamp(min = eps).log()
+def entropy_loss(affinity:torch.Tensor, temperature=0.01, eps=1e-5, pad_mask=None):
+    """
+    affinity: last dim is the affinity to all codes
 
-def entropy(prob):
-    return -prob * log(prob)
+    same formulation as https://github.com/google-research/maskgit/blob/1db23594e1bd328ee78eadcd148a19281cd0f5b8/maskgit/libml/losses.py#L190
+        as maskgit
+
+    same default temperature as in maskgit vqgan
+
+    pad_mask: contains True where padding is
+        applies to the leading dims of affinity
+    """
+    pad_mask = rearrange(pad_mask, 'b s -> (b s)')
+    affinity = rearrange(affinity, 'b s d z -> (b s) d z')
+
+    probs = (affinity / temperature).softmax(dim=-1)
+    log_probs = F.log_softmax((affinity / temperature) + eps, dim=-1)
+
+    # masked mean over all dims apart from the last z dim
+    # this should be within floating point errors of 
+    # probs[~pad_mask].reshape(-1, probs.shape[-1]).mean(dim=0)
+    avg_probs = masked_mean(probs, pad_mask, dim=0).mean(dim=0)
+
+    avg_entropy = -1 * (avg_probs * (avg_probs + eps).log()).sum()
+    sample_entropy = -1 * masked_mean((probs*log_probs).sum(dim=-1), pad_mask)
+    loss = sample_entropy - avg_entropy
+    return loss
 
 # class
 
@@ -65,8 +87,6 @@ class LFQ(Module):
         *,
         dim = None,
         codebook_size = None,
-        entropy_loss_weight = 0.1,
-        commitment_loss_weight = 1.,
         diversity_gamma = 2.5,
         straight_through_activation = nn.Identity(),
         num_codebooks = 1,
@@ -106,15 +126,10 @@ class LFQ(Module):
         # entropy aux loss related weights
 
         self.diversity_gamma = diversity_gamma
-        self.entropy_loss_weight = entropy_loss_weight
 
         # codebook scale
 
         self.codebook_scale = codebook_scale
-
-        # commitment loss
-
-        self.commitment_loss_weight = commitment_loss_weight
 
         # for no auxiliary loss, during inference
 
@@ -170,8 +185,8 @@ class LFQ(Module):
     def forward(
         self,
         x,
-        inv_temperature = 1.,
-        return_loss_breakdown = False
+        temperature = 0.01,
+        pad_mask=None,
     ):
         """
         einstein notation
@@ -179,9 +194,14 @@ class LFQ(Module):
         n - sequence (or flattened spatial dimensions)
         d - feature dimension, which is also log2(codebook size)
         c - number of codebook dim
+
+        pad_mask: contains True where padding is
         """
 
         is_img_or_video = x.ndim >= 4
+
+        if pad_mask is None:
+            raise NotImplementedError('pad mask')
 
         # standardize image or video into (batch, seq, dimension)
 
@@ -216,30 +236,21 @@ class LFQ(Module):
 
         indices = reduce((x > 0).int() * self.mask.int(), 'b n c d -> b n c', 'sum')
 
-        # entropy aux loss
-
         if self.training:
-            distance = euclidean_distance_squared(original_input, self.codebook)
-
-            prob = (-distance * inv_temperature).softmax(dim = -1)
-
-            per_sample_entropy = entropy(prob).mean()
-
-            avg_prob = reduce(prob, 'b n c d -> b c d', 'mean')
-            codebook_entropy = entropy(avg_prob).mean()
-
-            # 1. entropy will be nudged to be low for each code, to encourage the network to output confident predictions
-            # 2. codebook entropy will be nudged to be high, to encourage all codes to be uniformly used within the batch
-
-            entropy_aux_loss = per_sample_entropy - self.diversity_gamma * codebook_entropy
+            # the same as euclidean distance up to a constant
+            distance = -2 * einsum('... i d, j d -> ... i j', original_input, self.codebook)
+            entropy_aux_loss = entropy_loss(-distance, temperature=temperature, pad_mask=pad_mask)
         else:
-            # if not training, just return dummy 0
-            entropy_aux_loss = per_sample_entropy = codebook_entropy = self.zero
-
-        # commit loss
+            entropy_aux_loss = self.zero
 
         if self.training:
-            commit_loss = F.mse_loss(original_input, quantized.detach())
+            if pad_mask is not None:
+                # masked mse loss
+                commit_loss = F.mse_loss(original_input, quantized.detach(), reduction='none')
+                # Equivalent to commit_loss[~pad_mask].mean()
+                commit_loss = masked_mean(commit_loss, pad_mask, dim=0).sum(0).mean()
+            else:
+                commit_loss = F.mse_loss(original_input, quantized.detach())
         else:
             commit_loss = self.zero
 
@@ -264,13 +275,4 @@ class LFQ(Module):
         if not self.keep_num_codebooks_dim:
             indices = rearrange(indices, '... 1 -> ...')
 
-        # complete aux loss
-
-        aux_loss = entropy_aux_loss * self.entropy_loss_weight + commit_loss * self.commitment_loss_weight
-
-        ret = Return(x, indices, aux_loss)
-
-        if not return_loss_breakdown:
-            return ret
-
-        return ret, LossBreakdown(per_sample_entropy, codebook_entropy, commit_loss)
+        return x, indices, commit_loss, entropy_aux_loss

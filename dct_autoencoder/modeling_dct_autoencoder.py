@@ -69,7 +69,8 @@ class DCTAutoencoder(PreTrainedModel):
             dim=feature_dim,
             num_codebooks=config.vq_num_codebooks,
             codebook_size=config.vq_codebook_size,
-            #diversity_gamma = 50.0,
+            codebook_scale=0.5,
+            diversity_gamma = 10.0,
         )
 
         self.decoder = CLIPEncoder(
@@ -138,9 +139,9 @@ class DCTAutoencoder(PreTrainedModel):
             dct_patches.patches, attention_mask=dct_patches.attn_mask
         ).last_hidden_state
 
-        dct_patches.patches, codes, vq_loss = self.vq_model(dct_patches.patches)
+        dct_patches.patches, codes, commit_loss, entropy_loss = self.vq_model(dct_patches.patches, pad_mask=dct_patches.key_pad_mask)
 
-        return dct_patches, codes, vq_loss
+        return dct_patches, codes, commit_loss, entropy_loss
 
     def decode_from_codes(
             self, codes: torch.LongTensor, do_inv_norm:bool=False, **dct_patches_kwargs
@@ -171,12 +172,13 @@ class DCTAutoencoder(PreTrainedModel):
         dct_patches: DCTPatches,
         do_normalize:bool=False,
     ):
-        dct_patches, codes, vq_loss = self.encode(dct_patches, do_normalize=do_normalize)
+        dct_patches, codes, commit_loss, entropy_loss = self.encode(dct_patches, do_normalize=do_normalize)
 
         dct_patches = self.decode(dct_patches)
 
         return dict(
             dct_patches=dct_patches,
-            commit_loss=vq_loss,
+            commit_loss=commit_loss,
+            entropy_loss=entropy_loss,
             codes=codes,
         )

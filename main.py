@@ -1,4 +1,5 @@
 from typing import Callable, List, Optional
+import gc
 from tqdm import tqdm
 import torch
 from torch.utils.data import DataLoader
@@ -59,6 +60,12 @@ def step(
     # gets the mask, 1s where the sequences wasn't padded
     mask = ~output_patches.key_pad_mask
 
+    # observation: We don't care about loss over the frequencies that are close
+    # to zero. We want the model to be more inclined to output zeros
+    # this is suppressed by setting it to zero
+    low_freq_mask = batch.patches.abs() < 0.025
+    normalized_batch.patches[low_freq_mask] = 0.0
+
     # normalized loss
     # l1 is used because dct features are usually considered laplacian distributed
     rec_loss = F.l1_loss(output_patches.patches[mask], normalized_batch.patches[mask])
@@ -71,11 +78,6 @@ def step(
     # inverse normalization for output patches
     output_patches = autoencoder._inv_normalize(output_patches)
 
-#    # observation: We don't care about loss over the frequencies that are close
-#    # to zero. We want the model to be more inclined to output zeros
-#    low_freq_mask = batch.patches.abs() < 0.03
-#    batch.patches[low_freq_mask] = 0.0
-
     rec_loss_unnormalized = F.l1_loss(
         output_patches.patches[mask], batch.patches[mask]
     )
@@ -85,13 +87,12 @@ def step(
         rec_loss_unnormalized=rec_loss_unnormalized,
         perplexity=perplexity,
         commit_loss=res['commit_loss'],
+        entropy_loss=res['entropy_loss'],
     )
 
     if decode_pixels:
-        # un-patchifies the patches, and converts from dct to pixels
-        low_freq_mask = output_patches.patches.abs() < 0.025
-        output_patches.patches[low_freq_mask] = 0.0
         images_hat = proc.postprocess(output_patches)
+        batch = autoencoder._inv_normalize(normalized_batch)
         images = proc.postprocess(batch)
 
         pixel_loss = 0.0
@@ -160,7 +161,6 @@ def train(
     n_log: int = 10,
     max_steps: int = 1000000,
     num_workers: int = 0,
-    vq_callables: List[Callable[[int], dict]] = [],
     save_every=1000,
     use_pixel_loss=False,
     loss_weight={},
@@ -242,12 +242,6 @@ def train(
                 if image:
                     log_dict["image"] = image
 
-                for fn in vq_callables:
-                    d = fn(i)
-                    for k, v in d.items():
-                        autoencoder.vq_model.__dict__[k] = v
-                        log_dict[k] = v
-
                 print(log_dict)
                 wandb.log(
                     {"train": log_dict},
@@ -279,23 +273,31 @@ def main(
     num_workers: int = 0,
     train_norm_iters: int = 10,
     max_iters: int = 10000,
+    epochs:int=1,
     # This only applies if you are not using a preprocessed dataset
     sample_patches_beta: float = 0.02,
-    commitment_loss_weight_start: float = 1e-1,
-    commitment_loss_weight_end: float = 1e-9,
-    lfq_entropy_loss_start: float = 5e1,
-    lfq_entropy_loss_end: float = 1e-1,
+
     learning_rate: float = 1e-4,
-    # dict of k,v where k is the name of some loss term returned by train_step
-    loss_weight: dict[str, float] = {},
     seed: int = 42,
     log_every: int = 200,
     grad_accumulation_steps: int = 1,
     torch_compile: bool = False,
+
+    rec_loss_unnormalized: float = 1.0,
+    rec_loss: float = 0.1,
+    commit_loss: float = 0.1,
+    entropy_loss: float = 0.1,
 ):
     model_config: DCTAutoencoderConfig = DCTAutoencoderConfig.from_json_file(
         model_config_path
     )
+
+    # dict of k,v where k is the name of some loss term returned by train_step
+    loss_weight = dict(rec_loss=rec_loss,
+                       rec_loss_unnormalized=rec_loss_unnormalized,
+                       commit_loss=commit_loss,
+                       entropy_loss=entropy_loss,
+                       )
 
     random.seed(seed)
 
@@ -330,28 +332,6 @@ def main(
 
     max_seq_len = processor.max_seq_len
 
-    autoencoder.vq_model.entropy_loss_weight = lfq_entropy_loss_start
-    autoencoder.vq_model.commitment_loss_weight = commitment_loss_weight_start
-
-    commitment_loss_weight_n = max_iters
-    commitment_loss_weight_fn = get_decay_fn(
-        commitment_loss_weight_start,
-        commitment_loss_weight_end,
-        commitment_loss_weight_n,
-    )
-
-    lfq_entropy_loss_n = max_iters
-    lfq_decay_fn = get_decay_fn(
-        lfq_entropy_loss_start, lfq_entropy_loss_end, lfq_entropy_loss_n
-    )
-
-    vq_callables = [
-        lambda i: {
-            "entropy_loss_weight": lfq_decay_fn(i),
-            "commitment_loss_weight": commitment_loss_weight_fn(i),
-        }
-    ]
-
     if image_dataset_path_or_url is not None:
         train_ds = load_and_transform_dataset(
             image_dataset_path_or_url,
@@ -370,13 +350,7 @@ def main(
         sample_patches_beta=sample_patches_beta,
         max_seq_len=processor.max_seq_len,
         learning_rate=learning_rate,
-        commitment_loss_weight_start=commitment_loss_weight_start,
-        commitment_loss_weight_end=commitment_loss_weight_end,
-        commitment_loss_weight_n=commitment_loss_weight_n,
         n_params=n_params,
-        lfq_entropy_loss_start=lfq_entropy_loss_start,
-        lfq_entropy_loss_end=lfq_entropy_loss_end,
-        lfq_entropy_loss_n=lfq_entropy_loss_n,
         encoder_config=model_config.encoder_config,
         decoder_config=model_config.decoder_config,
         grad_accumulation_steps=grad_accumulation_steps,
@@ -434,18 +408,19 @@ def main(
         processor,
         train_ds,
         optimizer=optimizer,
+        epochs=epochs,
         scheduler=scheduler,
         accelerator=accelerator,
         batch_size=batch_size,
         num_workers=num_workers,
         max_steps=max_iters,
-        vq_callables=vq_callables,
         rng=rng,
         loss_weight=loss_weight,
         log_every=log_every,
     )
 
     autoencoder.save_pretrained(OUTDIR + "/model/")
+    accelerator.save_state(OUTDIR + "/accelerator_state/")
     print("done with all training")
 
     wandb.finish()
