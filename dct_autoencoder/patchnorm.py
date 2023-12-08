@@ -38,9 +38,9 @@ class PatchNorm(nn.Module):
         max_patch_w: int,
         patch_size: int,
         channels: int,
-        eps: float = 1e-5,
-        max_val: float = 6.0,
-        min_val: float = -6.0,
+        eps: float = 1e-6,
+        max_val: float = 20.0,
+        min_val: float = -20.0,
     ):
         super().__init__()
         self.eps = eps
@@ -150,7 +150,7 @@ class PatchNorm(nn.Module):
         medians = self.median[pos_channels, pos_h, pos_w]
         b = self.b[pos_channels, pos_h, pos_w] + self.eps
         n = self.n[pos_channels, pos_h, pos_w]
-        mask = n < 2
+        mask = n <= 2
 
         medians[mask] = 0.0
         b[mask] = 1.0
@@ -175,7 +175,7 @@ class PatchNorm(nn.Module):
         b = self.b[pos_channels, pos_h, pos_w] + self.eps
 
         n = self.n[pos_channels, pos_h, pos_w]
-        mask = n < 2
+        mask = n <= 2
         medians[mask] = 0.0
         b[mask] = 1.0
 

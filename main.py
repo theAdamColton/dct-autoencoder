@@ -1,5 +1,4 @@
-from typing import Callable, List, Optional
-import gc
+from typing import Optional
 from tqdm import tqdm
 import torch
 from torch.utils.data import DataLoader
@@ -18,7 +17,6 @@ from dct_autoencoder.util import (
     calculate_perplexity,
     create_output_directory,
     make_image_grid,
-    get_decay_fn,
 )
 from dct_autoencoder.factory import get_model_and_processor
 from dct_autoencoder.dataset import (
@@ -220,6 +218,9 @@ def train(
                             weight = 1.0
                         if weight != 0.0:
                             loss = loss + v * weight
+                            if torch.isnan(loss):
+                                print("NAN LOSS")
+                                return autoencoder, optimizer
 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
@@ -361,7 +362,8 @@ def main(
     )
 
     print("starting run: ", run_d)
-    wandb.init(project="vq-experiments", config=run_d)
+    if wandb.run is None:
+        wandb.init(project="vq-experiments", config=run_d)
 
     rng = random.Random(seed)
 
@@ -422,8 +424,6 @@ def main(
     autoencoder.save_pretrained(OUTDIR + "/model/")
     accelerator.save_state(OUTDIR + "/accelerator_state/")
     print("done with all training")
-
-    wandb.finish()
 
 
 if __name__ == "__main__":

@@ -60,7 +60,7 @@ def entropy_loss(affinity:torch.Tensor, temperature=0.01, eps=1e-5, pad_mask=Non
 
     same default temperature as in maskgit vqgan
 
-    pad_mask: contains True where padding is
+    pad_mask: contains False where padding is
         applies to the leading dims of affinity
     """
     pad_mask = rearrange(pad_mask, 'b s -> (b s)')

@@ -1,7 +1,5 @@
 import wandb
 from main import main
-import torch
-import gc
 
 sweep_configuration = {
     "method": "bayes",
@@ -9,29 +7,30 @@ sweep_configuration = {
     "parameters": {
         "learning_rate": {"max": 1e-3, "min": 5e-5, "distribution": "log_uniform_values"},
         "rec_loss": {"max": 1.0, "min": 0.01},
-        "entropy_loss": {"min": 1e-5, "max": 1e0, "distribution": "log_uniform_values"},
-        "commit_loss": {"min": 1e-5, "max": 1e0, "distribution": "log_uniform_values"},
+        "rec_loss_unnormalized": {"max": 1.0, "min": 0.01},
+        "entropy_loss": {"min": 1e-4, "max": 1e0, "distribution": "log_uniform_values"},
+        "commit_loss": {"min": 1e-4, "max": 1e0, "distribution": "log_uniform_values"},
     },
-    #"early_terminate": {"type": "hyperband", "max_iter": 1000, "s": 10},
+    "early_terminate": {"type": "hyperband",},
 }
 
-sweep_id = wandb.sweep(sweep=sweep_configuration, project="vq-experiments")
-
 def run_main():
-    wandb.init("vq-experiments")
+    wandb.init()
     main(
-        preprocessed_dataset_path_or_url= "/hdd/laion-improved-aesthetics-6p-preprocessed-p32-a0.015/000{000..199}.tar",
-        torch_compile= True,
+        preprocessed_dataset_path_or_url= "/hdd/laion-improved-aesthetics-6p-preprocessed-p32-a0.007/000{000..430}.tar",
+        torch_compile=True,
         seed= 42,
         num_workers=  2,
-        grad_accumulation_steps= 2,
-        batch_size=16,
-        train_norm_iters= 10,
-        max_iters= 50,
-        model_config_path= "./conf/patch32-xl.json",
-        model_resume_path="./out/clip_merged_model/",
-        sample_patches_beta= 0.015,
-        rec_loss_unnormalized=  1.0,
-            **wandb.config)
+        grad_accumulation_steps=2,
+        batch_size=6,
+        train_norm_iters=20,
+        max_iters= 3000,
+        log_every=250,
+        model_config_path= "./conf/patch32-xs.json",
+        accelerator_resume_path="./out/2023-12-04_11-43-09/accelerator_state/",
+        sample_patches_beta= 0.007,
+        **wandb.config
+    )
 
-wandb.agent(sweep_id, function=run_main, count=15)
+sweep_id = wandb.sweep(sweep=sweep_configuration, project="vq-experiments")
+wandb.agent(sweep_id, function=run_main, count=30)

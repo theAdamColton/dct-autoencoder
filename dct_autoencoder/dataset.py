@@ -24,7 +24,6 @@ def tuple_collate(x: List[Tuple]):
             lists[i].append(col)
     return lists
 
-
 def load_preprocessed_dataset(
     dataset_url: str,
     ):

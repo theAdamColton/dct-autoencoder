@@ -370,7 +370,7 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
 
         ph, pw = h // self.patch_size, w // self.patch_size
 
-        # patches x into a list of patches
+        # patches x into a list of channel patches
         x = rearrange(
             x,
             "c (h p1) (w p2) -> (h w) c (p1 p2)",
