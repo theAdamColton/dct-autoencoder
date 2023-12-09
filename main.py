@@ -15,6 +15,7 @@ from dct_autoencoder.feature_extraction_dct_autoencoder import (
 from dct_autoencoder.patchnorm import PatchNorm
 from dct_autoencoder.util import (
     calculate_perplexity,
+    compute_entropy_loss,
     create_output_directory,
     make_image_grid,
 )
@@ -45,24 +46,27 @@ def step(
     batch: DCTPatches,
     autoencoder: DCTAutoencoder,
     proc: DCTAutoencoderFeatureExtractor,
+    accelerator: Accelerator,
     decode_pixels=False,
 ):
     assert autoencoder.patchnorm.frozen
 
     normalized_batch = autoencoder._normalize(batch.shallow_copy())
 
-    res = autoencoder(normalized_batch.shallow_copy())
+    with accelerator.autocast():
+        res = autoencoder(normalized_batch.shallow_copy())
 
     output_patches = res["dct_patches"]
 
+    # entropy loss
+    if autoencoder.training:
+        entropy_loss = autoencoder.entropy_loss(res['distances'], mask=~output_patches.key_pad_mask)
+    else:
+        entropy_loss = 0.0
+
+
     # gets the mask, 1s where the sequences wasn't padded
     mask = ~output_patches.key_pad_mask
-
-    # observation: We don't care about loss over the frequencies that are close
-    # to zero. We want the model to be more inclined to output zeros
-    # this is suppressed by setting it to zero
-    low_freq_mask = batch.patches.abs() < 0.025
-    normalized_batch.patches[low_freq_mask] = 0.0
 
     # normalized loss
     # l1 is used because dct features are usually considered laplacian distributed
@@ -85,7 +89,7 @@ def step(
         rec_loss_unnormalized=rec_loss_unnormalized,
         perplexity=perplexity,
         commit_loss=res['commit_loss'],
-        entropy_loss=res['entropy_loss'],
+        entropy_loss=entropy_loss,
     )
 
     if decode_pixels:
@@ -144,7 +148,6 @@ def train_patch_norm(
     patch_norm = patch_norm.to(dtype)
     return patch_norm
 
-
 def train(
     autoencoder: DCTAutoencoder,
     proc: DCTAutoencoderFeatureExtractor,
@@ -160,6 +163,7 @@ def train(
     max_steps: int = 1000000,
     num_workers: int = 0,
     save_every=1000,
+    should_save=True,
     use_pixel_loss=False,
     loss_weight={},
 ):
@@ -190,6 +194,7 @@ def train(
                             batch,
                             autoencoder,
                             proc,
+                            accelerator,
                             decode_pixels=True,
                         )
                     autoencoder.train()
@@ -207,7 +212,7 @@ def train(
 
                 optimizer.zero_grad()
 
-                out = step(batch, autoencoder, proc, decode_pixels=use_pixel_loss)
+                out = step(batch, autoencoder, proc, accelerator, decode_pixels=use_pixel_loss)
 
                 loss = 0.0
                 for k, v in out.items():
@@ -218,9 +223,6 @@ def train(
                             weight = 1.0
                         if weight != 0.0:
                             loss = loss + v * weight
-                            if torch.isnan(loss):
-                                print("NAN LOSS")
-                                return autoencoder, optimizer
 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
@@ -248,10 +250,14 @@ def train(
                     {"train": log_dict},
                 )
 
+                if torch.isnan(loss):
+                    print("NAN LOSS ")
+                    return autoencoder, optimizer
+
                 if i > max_steps:
                     break
 
-                if i % save_every == 0 and i > 0:
+                if should_save and i % save_every == 0 and i > 0:
                     accelerator.save_state(OUTDIR + "/accelerator_state/")
                     autoencoder.save_pretrained(OUTDIR + "/model/")
 
@@ -277,6 +283,8 @@ def main(
     epochs:int=1,
     # This only applies if you are not using a preprocessed dataset
     sample_patches_beta: float = 0.02,
+
+    should_save = True,
 
     learning_rate: float = 1e-4,
     seed: int = 42,
@@ -322,14 +330,15 @@ def main(
 
     if torch_compile:
         # the forward method is patched,
-        def _c(mod):
-            mod.forward = torch.compile(
-                mod.forward,
-                fullgraph=True,
-                dynamic=False,
+        compile_kwargs = dict(fullgraph=True, dynamic=True)
+        autoencoder.forward = torch.compile(
+                autoencoder.forward,
+                **compile_kwargs
             )
+        autoencoder.entropy_loss = torch.compile(
+                autoencoder.entropy_loss,
+                 **compile_kwargs)
 
-        _c(autoencoder)
 
     max_seq_len = processor.max_seq_len
 
@@ -419,13 +428,16 @@ def main(
         rng=rng,
         loss_weight=loss_weight,
         log_every=log_every,
+        should_save=should_save,
     )
 
-    autoencoder.save_pretrained(OUTDIR + "/model/")
-    accelerator.save_state(OUTDIR + "/accelerator_state/")
+    if should_save:
+        autoencoder.save_pretrained(OUTDIR + "/model/")
+        accelerator.save_state(OUTDIR + "/accelerator_state/")
     print("done with all training")
 
 
 if __name__ == "__main__":
     import jsonargparse
     jsonargparse.CLI(main)
+    wandb.finish()

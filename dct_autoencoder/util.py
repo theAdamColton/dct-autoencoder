@@ -11,7 +11,7 @@ import random
 import math
 from PIL import ImageDraw
 from PIL import ImageFont
-from einops import einsum
+from einops import einsum, rearrange
 from datetime import datetime
 
 
@@ -334,6 +334,56 @@ def dct2(x, norm=None):
 
 def idct2(x, norm=None):
     return idct_2d(x, norm)
+
+
+def mult_along_first_dims(x, y):
+    # returns x * y elementwise
+    ndim_to_expand = x.ndim - y.ndim
+    return x * y[..., *[None for _ in range(ndim_to_expand)]]
+
+def masked_mean(x, m, dim=None):
+    # takes the mean of the elements of x that are not masked
+    x = mult_along_first_dims(x, m)
+    x = x / m.sum()
+    if dim is None:
+        return x.sum()
+    else:
+        return x.sum(dim=dim)
+
+def compute_entropy_loss(affinity:torch.Tensor, mask:torch.BoolTensor, temperature=0.01, eps=1e-4):
+    """
+    affinity: last dim is the affinity to all codes
+
+    same formulation as https://github.com/google-research/maskgit/blob/1db23594e1bd328ee78eadcd148a19281cd0f5b8/maskgit/libml/losses.py#L190
+        as maskgit
+
+    same default temperature as in maskgit vqgan
+
+    mask: contains False where padding is
+        applies to the leading dims of affinity
+    """
+    og_dtype = affinity.dtype
+    # TODO put this somewhere else
+    affinity = affinity.to(torch.float32)
+
+    mask = rearrange(mask, 'b s -> (b s)')
+    affinity = rearrange(affinity, 'b s d z -> (b s) d z')
+
+    probs = ((affinity / temperature) + eps).softmax(dim=-1)
+    log_probs = F.log_softmax((affinity / temperature) + eps, dim=-1)
+
+    # masked mean over all dims apart from the last z dim
+    # this should be within floating point errors of 
+    # probs[mask].reshape(-1, probs.shape[-1]).mean(dim=0)
+    avg_probs = masked_mean(probs, mask, dim=0).mean(dim=0)
+
+    avg_entropy = -1 * (avg_probs * (avg_probs + eps).log()).sum()
+    sample_entropy = -1 * masked_mean((probs*log_probs).sum(dim=-1), mask)
+    loss = sample_entropy - avg_entropy
+
+    loss = loss.to(og_dtype)
+    return loss
+
 
 
 def calculate_perplexity(codes, codebook_size, null_index=-1):
