@@ -39,8 +39,8 @@ class PatchNorm(nn.Module):
         patch_size: int,
         channels: int,
         eps: float = 1e-6,
-        max_val: float = 8.0,
-        min_val: float = -8.0,
+        max_val: float = 10.0,
+        min_val: float = -10.0,
     ):
         super().__init__()
         self.eps = eps
@@ -72,6 +72,10 @@ class PatchNorm(nn.Module):
 
         self.max_val = max_val
         self.min_val = min_val
+
+    @property
+    def std(self) -> torch.Tensor:
+        return self.b * 2**0.5
 
     
     def forward(
@@ -148,14 +152,13 @@ class PatchNorm(nn.Module):
 
 
         medians = self.median[pos_channels, pos_h, pos_w]
-        b = self.b[pos_channels, pos_h, pos_w] + self.eps
+        std = self.std[pos_channels, pos_h, pos_w] + self.eps
         n = self.n[pos_channels, pos_h, pos_w]
         mask = n <= 2
 
-        medians[mask] = 0.0
-        b[mask] = 1.0
+        patches = (patches - medians) / std
 
-        patches = (patches - medians) / b
+        patches[mask] = 0.0
 
         patches.clamp_(self.min_val, self.max_val)
 
@@ -172,11 +175,10 @@ class PatchNorm(nn.Module):
         pos_w = dct_patches.w_indices
 
         medians = self.median[pos_channels, pos_h, pos_w]
-        b = self.b[pos_channels, pos_h, pos_w] + self.eps
+        std = self.std[pos_channels, pos_h, pos_w] + self.eps
 
         n = self.n[pos_channels, pos_h, pos_w]
         mask = n <= 2
-        medians[mask] = 0.0
-        b[mask] = 1.0
+        patches[mask] = 0.0
 
-        return patches * b + medians
+        return patches * std + medians

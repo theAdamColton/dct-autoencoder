@@ -81,15 +81,17 @@ class DCTAutoencoder(PreTrainedModel):
             nn.Linear(feature_dim, patch_dim, bias=False),
         )
 
+    def get_pos_embedding_decoder(self, dct_patches: DCTPatches):
+        c_pos = self.decoder_pos_embed_channel[dct_patches.patch_channels]
+        h_pos = self.decoder_pos_embed_height[dct_patches.h_indices]
+        w_pos = self.decoder_pos_embed_width[dct_patches.w_indices]
+        return h_pos + w_pos + c_pos
+
     def _add_pos_embedding_decoder(self, dct_patches: DCTPatches):
         """
         in place
         """
-        c_pos = self.decoder_pos_embed_channel[dct_patches.patch_channels]
-        h_pos = self.decoder_pos_embed_height[dct_patches.h_indices]
-        w_pos = self.decoder_pos_embed_width[dct_patches.w_indices]
-
-        dct_patches.patches = dct_patches.patches + h_pos + w_pos + c_pos
+        dct_patches.patches = dct_patches.patches + self.get_pos_embedding_decoder(dct_patches)
         return dct_patches
 
     def _add_pos_embedding_encoder(self, dct_patches: DCTPatches):

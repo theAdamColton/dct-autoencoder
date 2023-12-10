@@ -49,7 +49,7 @@ def get_model_and_processor(
     else:
         assert model_config is not None
         model = DCTAutoencoder(model_config).to(dtype).to(device)
-    
+
     max_seq_len = get_max_seq_length(model_config, sample_patches_beta)
 
     proc = DCTAutoencoderFeatureExtractor(

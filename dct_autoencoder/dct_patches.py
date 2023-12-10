@@ -50,6 +50,7 @@ class DCTPatches:
         self.patch_positions = self.patch_positions.to(what)
         return self
 
+
 def to_dict(dct_patches: DCTPatches, codes: torch.LongTensor):
     b,s,h = codes.shape
     assert b == dct_patches.patches.shape[0]

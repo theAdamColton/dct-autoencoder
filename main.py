@@ -8,6 +8,7 @@ from bitsandbytes.optim import PagedAdamW32bit
 import wandb
 import random
 from transformers.optimization import get_cosine_schedule_with_warmup
+from dct_autoencoder.discriminator import Discriminator
 
 from dct_autoencoder.feature_extraction_dct_autoencoder import (
     DCTAutoencoderFeatureExtractor,
@@ -15,7 +16,6 @@ from dct_autoencoder.feature_extraction_dct_autoencoder import (
 from dct_autoencoder.patchnorm import PatchNorm
 from dct_autoencoder.util import (
     calculate_perplexity,
-    compute_entropy_loss,
     create_output_directory,
     make_image_grid,
 )
@@ -41,9 +41,37 @@ def get_loss_dict(d):
             o[k] = float(round(v.item(), 5))
     return o
 
+def step_discriminator(
+        real_patches: DCTPatches,
+        rec_patches: DCTPatches,
+        discriminator: Discriminator,
+        accelerator: Accelerator,
+        ):
+    # adds pos info
+    real_patches = discriminator.add_pos_embedding_(real_patches.shallow_copy())
+    rec_patches = discriminator.add_pos_embedding_(rec_patches.shallow_copy())
 
-def step(
+    inputs = torch.concat([real_patches.patches, rec_patches.patches], dim=0)
+
+    labels = torch.concat([
+        torch.zeros(real_patches.patches.shape[0], real_patches.patches.shape[1], dtype = torch.long),
+        torch.ones(rec_patches.patches.shape[0], rec_patches.patches.shape[1], dtype = torch.long),
+        ]).to(accelerator.device)
+
+    key_pad_mask = torch.concat([real_patches.key_pad_mask, rec_patches.key_pad_mask], dim=0)
+
+    labels[key_pad_mask] = -100
+
+    with accelerator.autocast():
+        preds = discriminator(inputs)
+
+    loss = F.cross_entropy(preds.view(-1, preds.shape[-1]), labels.view(-1), ignore_index = -100)
+
+    return loss
+
+def step_autoencoder(
     batch: DCTPatches,
+    normalized_batch: DCTPatches,
     autoencoder: DCTAutoencoder,
     proc: DCTAutoencoderFeatureExtractor,
     accelerator: Accelerator,
@@ -51,7 +79,6 @@ def step(
 ):
     assert autoencoder.patchnorm.frozen
 
-    normalized_batch = autoencoder._normalize(batch.shallow_copy())
 
     with accelerator.autocast():
         res = autoencoder(normalized_batch.shallow_copy())
@@ -78,13 +105,14 @@ def step(
         )
 
     # inverse normalization for output patches
-    output_patches = autoencoder._inv_normalize(output_patches)
+    output_patches_raw = autoencoder._inv_normalize(output_patches.shallow_copy())
 
     rec_loss_unnormalized = F.l1_loss(
-        output_patches.patches[mask], batch.patches[mask]
+        output_patches_raw.patches[mask], batch.patches[mask]
     )
 
     out = dict(
+        rec_patches=output_patches,
         rec_loss=rec_loss,
         rec_loss_unnormalized=rec_loss_unnormalized,
         perplexity=perplexity,
@@ -93,7 +121,7 @@ def step(
     )
 
     if decode_pixels:
-        images_hat = proc.postprocess(output_patches)
+        images_hat = proc.postprocess(output_patches_raw)
         batch = autoencoder._inv_normalize(normalized_batch)
         images = proc.postprocess(batch)
 
@@ -150,6 +178,7 @@ def train_patch_norm(
 
 def train(
     autoencoder: DCTAutoencoder,
+    discriminator: Discriminator,
     proc: DCTAutoencoderFeatureExtractor,
     train_ds,
     optimizer,
@@ -183,6 +212,9 @@ def train(
             with accelerator.accumulate(autoencoder):
                 batch = batch.to(accelerator.device)
                 batch.patches = batch.patches.to(autoencoder.dtype)
+
+                normalized_batch = autoencoder._normalize(batch.shallow_copy())
+
                 seq_len = batch.patches.shape[1]
                 batch_len = batch.patches.shape[0]
 
@@ -190,8 +222,9 @@ def train(
                     print("logging images ....")
                     autoencoder.eval()
                     with torch.inference_mode():
-                        out = step(
+                        out = step_autoencoder(
                             batch,
+                            normalized_batch,
                             autoencoder,
                             proc,
                             accelerator,
@@ -210,9 +243,23 @@ def train(
                 else:
                     image = None
 
-                optimizer.zero_grad()
+                # First, collects gradients for the autoencoder
 
-                out = step(batch, autoencoder, proc, accelerator, decode_pixels=use_pixel_loss)
+                out = step_autoencoder(batch, normalized_batch, autoencoder, proc, accelerator, decode_pixels=use_pixel_loss)
+                rec_patches = out['rec_patches']
+
+
+
+                # this loss is how well the discriminator is fooled
+
+                # but disables gradients for the discriminator
+                for p in discriminator.parameters():
+                    p.requires_grad_(False)
+                discriminator = discriminator.eval()
+
+                loss_fool_discriminator = step_discriminator(
+                        real_patches=rec_patches.shallow_copy(), rec_patches=normalized_batch.shallow_copy(), discriminator=discriminator, accelerator=accelerator)
+                out['loss_fool_discriminator'] = loss_fool_discriminator
 
                 loss = 0.0
                 for k, v in out.items():
@@ -225,6 +272,21 @@ def train(
                             loss = loss + v * weight
 
                 accelerator.backward(loss)
+
+                # Second, collects gradients for the trains the discriminator
+
+                for p in discriminator.parameters():
+                    p.requires_grad_(True)
+                discriminator = discriminator.train()
+
+                rec_patches.patches = rec_patches.patches.detach()
+
+                loss_discriminator_classification = step_discriminator(
+                        real_patches=normalized_batch.shallow_copy(), rec_patches=rec_patches.shallow_copy(), discriminator=discriminator, accelerator=accelerator)
+
+                accelerator.backward(loss_discriminator_classification)
+
+                # optimizer step
                 if accelerator.sync_gradients:
                     accelerator.clip_grad_norm_(autoencoder.parameters(), 1.0)
                     scheduler.step()
@@ -240,6 +302,7 @@ def train(
                     batch_len=batch_len,
                     seq_len=seq_len,
                     loss=loss.item(),
+                    loss_discriminator_classification=loss_discriminator_classification.item(),
                     **get_loss_dict(out),
                 )
                 if image:
@@ -252,7 +315,7 @@ def train(
 
                 if torch.isnan(loss):
                     print("NAN LOSS ")
-                    return autoencoder, optimizer
+                    return autoencoder, optimizer, discriminator
 
                 if i > max_steps:
                     break
@@ -261,7 +324,7 @@ def train(
                     accelerator.save_state(OUTDIR + "/accelerator_state/")
                     autoencoder.save_pretrained(OUTDIR + "/model/")
 
-    return autoencoder, optimizer
+    return autoencoder, optimizer, discriminator
 
 
 def main(
@@ -296,6 +359,7 @@ def main(
     rec_loss: float = 0.1,
     commit_loss: float = 0.1,
     entropy_loss: float = 0.1,
+    loss_fool_discriminator: float = 0.1,
 ):
     model_config: DCTAutoencoderConfig = DCTAutoencoderConfig.from_json_file(
         model_config_path
@@ -306,7 +370,8 @@ def main(
                        rec_loss_unnormalized=rec_loss_unnormalized,
                        commit_loss=commit_loss,
                        entropy_loss=entropy_loss,
-                       )
+                       loss_fool_discriminator=loss_fool_discriminator,
+                   )
 
     random.seed(seed)
 
@@ -323,10 +388,19 @@ def main(
         model_config, device, dtype, sample_patches_beta, model_resume_path
     )
 
+    discriminator = Discriminator(
+            model_config.max_patch_h,
+            model_config.max_patch_w,
+            model_config.image_channels,
+            autoencoder.config.patch_size ** 2,
+            [512,256,512,2])
+
     if autocast_dtype == "no":
         autoencoder = autoencoder.to(dtype)
+        discriminator = discriminator.to(dtype)
     else:
         autoencoder = autoencoder.to(torch.float32)
+        discriminator = discriminator.to(torch.float32)
 
     if torch_compile:
         # the forward method is patched,
@@ -337,6 +411,9 @@ def main(
             )
         autoencoder.entropy_loss = torch.compile(
                 autoencoder.entropy_loss,
+                 **compile_kwargs)
+        discriminator = torch.compile(
+                discriminator,
                  **compile_kwargs)
 
 
@@ -396,10 +473,13 @@ def main(
         print("done training norm")
     autoencoder.patchnorm.frozen = True
 
-    optimizer = PagedAdamW32bit(autoencoder.parameters(), lr=learning_rate, 
-                                betas=(0.9, 0.99),
-                                weight_decay=1e-1
-                                )
+    optimizer = PagedAdamW32bit(
+            list(autoencoder.parameters()) \
+                    + list(discriminator.parameters()),
+            lr=learning_rate,
+            betas=(0.9, 0.99),
+            weight_decay=1e-1
+            )
 
     scheduler = get_cosine_schedule_with_warmup(optimizer, 400, max_iters)
 
@@ -408,14 +488,15 @@ def main(
         mixed_precision=autocast_dtype,
     )
 
-    autoencoder, optimizer, scheduler = accelerator.prepare(autoencoder, optimizer, scheduler)
+    autoencoder, discriminator, optimizer, scheduler = accelerator.prepare(autoencoder, discriminator, optimizer, scheduler)
 
     if accelerator_resume_path is not None:
         print("loading accelerator state...")
         accelerator.load_state(accelerator_resume_path)
 
-    autoencoder, optimizer = train(
+    autoencoder, optimizer, discriminator = train(
         autoencoder,
+        discriminator,
         processor,
         train_ds,
         optimizer=optimizer,
