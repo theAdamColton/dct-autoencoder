@@ -41,33 +41,63 @@ def get_loss_dict(d):
             o[k] = float(round(v.item(), 5))
     return o
 
+def step_fool_discriminator(
+        rec_patches: DCTPatches,
+        discriminator: Discriminator,
+        accelerator: Accelerator,
+        ):
+    """
+    non saturating gan loss
+
+    https://arxiv.org/abs/2006.09965
+    """
+    with accelerator.autocast():
+        preds_rec = discriminator(rec_patches)
+
+    loss = - F.logsigmoid(preds_rec)
+
+    # only take loss for the (0,0) patches
+    mask = (~rec_patches.key_pad_mask) & (rec_patches.h_indices == 0) \
+             & (rec_patches.w_indices == 0)
+    loss = loss[mask].mean()
+
+    correct = F.sigmoid(preds_rec[mask]) < 0.5
+    accuracy = correct.sum() / correct.nelement()
+    accuracy = accuracy.item()
+
+    return dict(loss=loss, accuracy=accuracy)
+
+
 def step_discriminator(
         real_patches: DCTPatches,
         rec_patches: DCTPatches,
         discriminator: Discriminator,
         accelerator: Accelerator,
         ):
-    # adds pos info
-    real_patches = discriminator.add_pos_embedding_(real_patches.shallow_copy())
-    rec_patches = discriminator.add_pos_embedding_(rec_patches.shallow_copy())
+    """
+    non saturating discr loss
 
-    inputs = torch.concat([real_patches.patches, rec_patches.patches], dim=0)
+    https://arxiv.org/abs/2006.09965
+    """
 
-    labels = torch.concat([
-        torch.zeros(real_patches.patches.shape[0], real_patches.patches.shape[1], dtype = torch.long),
-        torch.ones(rec_patches.patches.shape[0], rec_patches.patches.shape[1], dtype = torch.long),
-        ]).to(accelerator.device)
-
-    key_pad_mask = torch.concat([real_patches.key_pad_mask, rec_patches.key_pad_mask], dim=0)
-
-    labels[key_pad_mask] = -100
+    rec_patches.patches = rec_patches.patches.detach()
 
     with accelerator.autocast():
-        preds = discriminator(inputs)
+        preds_real = discriminator(real_patches)
+        preds_rec = discriminator(rec_patches)
 
-    loss = F.cross_entropy(preds.view(-1, preds.shape[-1]), labels.view(-1), ignore_index = -100)
+    loss = - F.logsigmoid(preds_real) - torch.log(1 - F.sigmoid(preds_rec))
 
-    return loss
+    # only take loss for the (0,0) patches
+    mask = (~rec_patches.key_pad_mask) & (rec_patches.h_indices == 0) \
+             & (rec_patches.w_indices == 0)
+    loss = loss[mask].mean()
+
+    correct = preds_rec[mask] < preds_real[mask]
+    accuracy = correct.sum() / correct.nelement()
+    accuracy = accuracy.item()
+
+    return dict(loss=loss, accuracy=accuracy)
 
 def step_autoencoder(
     batch: DCTPatches,
@@ -105,14 +135,15 @@ def step_autoencoder(
         )
 
     # inverse normalization for output patches
-    output_patches_raw = autoencoder._inv_normalize(output_patches.shallow_copy())
+    output_patches_unnormalized = autoencoder.inv_normalize_(output_patches.shallow_copy())
 
     rec_loss_unnormalized = F.l1_loss(
-        output_patches_raw.patches[mask], batch.patches[mask]
+        output_patches_unnormalized.patches[mask], batch.patches[mask]
     )
 
     out = dict(
         rec_patches=output_patches,
+        rec_patches_unnormalized=output_patches_unnormalized,
         rec_loss=rec_loss,
         rec_loss_unnormalized=rec_loss_unnormalized,
         perplexity=perplexity,
@@ -121,8 +152,8 @@ def step_autoencoder(
     )
 
     if decode_pixels:
-        images_hat = proc.postprocess(output_patches_raw)
-        batch = autoencoder._inv_normalize(normalized_batch)
+        images_hat = proc.postprocess(output_patches_unnormalized)
+        batch = autoencoder.inv_normalize_(normalized_batch)
         images = proc.postprocess(batch)
 
         pixel_loss = 0.0
@@ -195,7 +226,10 @@ def train(
     should_save=True,
     use_pixel_loss=False,
     loss_weight={},
+    warmup_dict={},
 ):
+    global_step = 0
+
     # ----------- Model Training --------------
     for epoch_i in range(epochs):
         train_ds = train_ds.shuffle(1000, rng=rng)
@@ -213,7 +247,7 @@ def train(
                 batch = batch.to(accelerator.device)
                 batch.patches = batch.patches.to(autoencoder.dtype)
 
-                normalized_batch = autoencoder._normalize(batch.shallow_copy())
+                normalized_batch = autoencoder.normalize_(batch.shallow_copy())
 
                 seq_len = batch.patches.shape[1]
                 batch_len = batch.patches.shape[0]
@@ -246,19 +280,18 @@ def train(
                 # First, collects gradients for the autoencoder
 
                 out = step_autoencoder(batch, normalized_batch, autoencoder, proc, accelerator, decode_pixels=use_pixel_loss)
-                rec_patches = out['rec_patches']
+                rec_patches= out['rec_patches']
 
 
 
                 # this loss is how well the discriminator is fooled
-
-                # but disables gradients for the discriminator
+                # but disables gradient trackign for the discriminator
                 for p in discriminator.parameters():
                     p.requires_grad_(False)
                 discriminator = discriminator.eval()
 
-                loss_fool_discriminator = step_discriminator(
-                        real_patches=rec_patches.shallow_copy(), rec_patches=normalized_batch.shallow_copy(), discriminator=discriminator, accelerator=accelerator)
+                loss_fool_discriminator = step_fool_discriminator(
+                        rec_patches=rec_patches.shallow_copy(), discriminator=discriminator, accelerator=accelerator)['loss']
                 out['loss_fool_discriminator'] = loss_fool_discriminator
 
                 loss = 0.0
@@ -268,27 +301,32 @@ def train(
                             weight = loss_weight[k]
                         else:
                             weight = 1.0
+
+                        if k in warmup_dict:
+                            warmup = warmup_dict[k]
+                            if global_step <= warmup:
+                                weight = weight * ((global_step+1) / warmup)
+
                         if weight != 0.0:
                             loss = loss + v * weight
 
                 accelerator.backward(loss)
 
-                # Second, collects gradients for the trains the discriminator
+                # Second, collects gradients for the discriminator
 
                 for p in discriminator.parameters():
                     p.requires_grad_(True)
                 discriminator = discriminator.train()
 
-                rec_patches.patches = rec_patches.patches.detach()
-
-                loss_discriminator_classification = step_discriminator(
+                discriminator_res = step_discriminator(
                         real_patches=normalized_batch.shallow_copy(), rec_patches=rec_patches.shallow_copy(), discriminator=discriminator, accelerator=accelerator)
+                loss_discriminator_classification = discriminator_res['loss']
 
                 accelerator.backward(loss_discriminator_classification)
 
                 # optimizer step
                 if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(autoencoder.parameters(), 1.0)
+                    accelerator.clip_grad_norm_(list(autoencoder.parameters()) + list(discriminator.parameters()), 1.0)
                     scheduler.step()
 
                 optimizer.step()
@@ -303,6 +341,7 @@ def train(
                     seq_len=seq_len,
                     loss=loss.item(),
                     loss_discriminator_classification=loss_discriminator_classification.item(),
+                    discriminator_classification_accuracy=discriminator_res['accuracy'],
                     **get_loss_dict(out),
                 )
                 if image:
@@ -324,6 +363,8 @@ def train(
                     accelerator.save_state(OUTDIR + "/accelerator_state/")
                     autoencoder.save_pretrained(OUTDIR + "/model/")
 
+                global_step += 1
+
     return autoencoder, optimizer, discriminator
 
 
@@ -334,7 +375,7 @@ def main(
     # preprocessed_dataset_path_or_url refers to a dataset preprocessed using
     # ./preproc_dataset.py
     preprocessed_dataset_path_or_url: str = None,
-    model_config_path="./conf/patch32-large.json",
+    model_config_path="./conf/patch14-l.json",
     model_resume_path: Optional[str] = None,
     accelerator_resume_path: Optional[str] = None,
     device="cuda",
@@ -365,6 +406,11 @@ def main(
         model_config_path
     )
 
+    warmup_dict = dict(
+            # steps of warmup for this loss term
+            loss_fool_discriminator=2000,
+        )
+
     # dict of k,v where k is the name of some loss term returned by train_step
     loss_weight = dict(rec_loss=rec_loss,
                        rec_loss_unnormalized=rec_loss_unnormalized,
@@ -393,7 +439,7 @@ def main(
             model_config.max_patch_w,
             model_config.image_channels,
             autoencoder.config.patch_size ** 2,
-            [512,256,512,2])
+    )
 
     if autocast_dtype == "no":
         autoencoder = autoencoder.to(dtype)
@@ -481,7 +527,7 @@ def main(
             weight_decay=1e-1
             )
 
-    scheduler = get_cosine_schedule_with_warmup(optimizer, 400, max_iters)
+    scheduler = get_cosine_schedule_with_warmup(optimizer, 200, max_iters)
 
     accelerator = Accelerator(
         gradient_accumulation_steps=grad_accumulation_steps,
@@ -499,6 +545,7 @@ def main(
         discriminator,
         processor,
         train_ds,
+        warmup_dict=warmup_dict,
         optimizer=optimizer,
         epochs=epochs,
         scheduler=scheduler,

@@ -87,14 +87,14 @@ class DCTAutoencoder(PreTrainedModel):
         w_pos = self.decoder_pos_embed_width[dct_patches.w_indices]
         return h_pos + w_pos + c_pos
 
-    def _add_pos_embedding_decoder(self, dct_patches: DCTPatches):
+    def add_pos_embedding_decoder_(self, dct_patches: DCTPatches):
         """
         in place
         """
         dct_patches.patches = dct_patches.patches + self.get_pos_embedding_decoder(dct_patches)
         return dct_patches
 
-    def _add_pos_embedding_encoder(self, dct_patches: DCTPatches):
+    def add_pos_embedding_encoder_(self, dct_patches: DCTPatches):
         """
         in place
         """
@@ -106,14 +106,14 @@ class DCTAutoencoder(PreTrainedModel):
         return dct_patches
 
     @torch.no_grad()
-    def _normalize(
+    def normalize_(
         self,
         x: DCTPatches,
     ):
         x.patches = self.patchnorm(x)
         return x
 
-    def _inv_normalize(
+    def inv_normalize_(
         self,
         x: DCTPatches,
     ):
@@ -127,12 +127,12 @@ class DCTAutoencoder(PreTrainedModel):
     ):
         # normalizes
         if do_normalize:
-            dct_patches = self._normalize(dct_patches)
+            dct_patches = self.normalize_(dct_patches)
 
         dct_patches.patches = self.to_patch_embedding(dct_patches.patches)
 
         # Adds positional embedding info
-        dct_patches = self._add_pos_embedding_encoder(dct_patches)
+        dct_patches = self.add_pos_embedding_encoder_(dct_patches)
 
         # X-Transformers uses ~attn_mask
         # TODO Should be ~ attn mask?
@@ -160,11 +160,11 @@ class DCTAutoencoder(PreTrainedModel):
         """
         in-place
         """
-        x = self._add_pos_embedding_decoder(x)
+        x = self.add_pos_embedding_decoder_(x)
         # TODO Should be ~ attn mask?
         x.patches = self.proj_out(self.decoder(x.patches, attention_mask=x.attn_mask).last_hidden_state)
         if do_inv_norm:
-            x = self._inv_normalize(x)
+            x = self.inv_normalize_(x)
         return x
 
     def forward(

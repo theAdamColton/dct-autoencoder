@@ -22,7 +22,7 @@ dl = proc.iter_batches(iter(dl), batch_size=5)
 for batch in dl:
     batch = batch.to('cuda')
     batch.patches = batch.patches.to(torch.float16)
-    batch = model._normalize(batch)
+    batch = model.normalize_(batch)
     st = time.time()
     out = model(batch.shallow_copy())['dct_patches']
     et = time.time()

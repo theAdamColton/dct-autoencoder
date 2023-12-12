@@ -177,8 +177,4 @@ class PatchNorm(nn.Module):
         medians = self.median[pos_channels, pos_h, pos_w]
         std = self.std[pos_channels, pos_h, pos_w] + self.eps
 
-        n = self.n[pos_channels, pos_h, pos_w]
-        mask = n <= 2
-        patches[mask] = 0.0
-
         return patches * std + medians
