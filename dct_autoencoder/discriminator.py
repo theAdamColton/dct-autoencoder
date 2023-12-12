@@ -1,4 +1,3 @@
-from typing import List
 import torch
 from torch import nn
 from transformers import CLIPVisionConfig
@@ -7,7 +6,7 @@ from transformers.models.clip.modeling_clip import CLIPEncoder
 from .dct_patches import DCTPatches
 
 class Discriminator(nn.Module):
-    def __init__(self, max_patch_h: int, max_patch_w: int, channels: int, patch_dim: int):
+    def __init__(self, max_patch_h: int, max_patch_w: int, channels: int, patch_dim: int, condition_dim: int):
         super().__init__()
         self.pos_embed_channel = nn.Parameter(torch.randn(channels, patch_dim))
         self.pos_embed_height = nn.Parameter(torch.randn(max_patch_h, patch_dim))
@@ -16,7 +15,7 @@ class Discriminator(nn.Module):
         feature_dim = 256
 
         self.to_patch_embedding = nn.Sequential(
-            nn.Linear(patch_dim, feature_dim, bias=False),
+            nn.Linear(patch_dim + condition_dim, feature_dim, bias=False),
             nn.LayerNorm(feature_dim, eps=1e-4),
         )
 
@@ -42,14 +41,16 @@ class Discriminator(nn.Module):
         c_pos = self.pos_embed_channel[dct_patches.patch_channels]
         h_pos = self.pos_embed_height[dct_patches.h_indices]
         w_pos = self.pos_embed_width[dct_patches.w_indices]
-        dct_patches.patches = dct_patches.patches + h_pos + w_pos + c_pos
-        return dct_patches
+        patches = dct_patches.patches + h_pos + w_pos + c_pos
+        return patches
 
-    def forward(self, x:DCTPatches):
+    def forward(self, x:DCTPatches, z: torch.Tensor):
         """
         x should be a batch of normalized DCTPatches
+        z is the embedded tensor for conditioning
         """
-        x = self.add_pos_embedding_(x)
-        x.patches = self.to_patch_embedding(x.patches)
-        preds = self.encoder(x.patches, attention_mask = x.attn_mask).last_hidden_state
+        x_proj = self.add_pos_embedding_(x)
+        z = torch.concat([x_proj,z], dim=-1)
+        z = self.to_patch_embedding(z)
+        preds = self.encoder(z, attention_mask = x.attn_mask).last_hidden_state
         return self.proj_out(preds)

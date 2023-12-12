@@ -175,6 +175,8 @@ class DCTAutoencoder(PreTrainedModel):
     ):
         dct_patches, codes, commit_loss, distances = self.encode(dct_patches, do_normalize=do_normalize)
 
+        z = dct_patches.patches
+
         dct_patches = self.decode(dct_patches)
 
         return dict(
@@ -182,6 +184,7 @@ class DCTAutoencoder(PreTrainedModel):
             commit_loss=commit_loss,
             codes=codes,
             distances=distances,
+            z=z,
         )
 
     def entropy_loss(self, distances: torch.Tensor, mask:torch.BoolTensor):

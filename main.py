@@ -43,6 +43,7 @@ def get_loss_dict(d):
 
 def step_fool_discriminator(
         rec_patches: DCTPatches,
+        z: torch.Tensor,
         discriminator: Discriminator,
         accelerator: Accelerator,
         ):
@@ -52,7 +53,7 @@ def step_fool_discriminator(
     https://arxiv.org/abs/2006.09965
     """
     with accelerator.autocast():
-        preds_rec = discriminator(rec_patches)
+        preds_rec = discriminator(rec_patches, z.detach())
 
     loss = - F.logsigmoid(preds_rec)
 
@@ -71,6 +72,7 @@ def step_fool_discriminator(
 def step_discriminator(
         real_patches: DCTPatches,
         rec_patches: DCTPatches,
+        z: torch.Tensor,
         discriminator: Discriminator,
         accelerator: Accelerator,
         ):
@@ -81,10 +83,11 @@ def step_discriminator(
     """
 
     rec_patches.patches = rec_patches.patches.detach()
+    z = z.detach()
 
     with accelerator.autocast():
-        preds_real = discriminator(real_patches)
-        preds_rec = discriminator(rec_patches)
+        preds_real = discriminator(real_patches,z)
+        preds_rec = discriminator(rec_patches,z)
 
     loss = - F.logsigmoid(preds_real) - torch.log(1 - F.sigmoid(preds_rec))
 
@@ -149,6 +152,7 @@ def step_autoencoder(
         perplexity=perplexity,
         commit_loss=res['commit_loss'],
         entropy_loss=entropy_loss,
+        z = res['z'],
     )
 
     if decode_pixels:
@@ -255,7 +259,7 @@ def train(
                 if i % log_every == 0:
                     print("logging images ....")
                     autoencoder.eval()
-                    with torch.inference_mode():
+                    with torch.no_grad():
                         out = step_autoencoder(
                             batch,
                             normalized_batch,
@@ -271,7 +275,6 @@ def train(
                         filename=f"{OUTDIR}/train image {i:04}.png",
                         n=n_log,
                     )
-
                     image = wandb.Image(image)
                     out = None
                 else:
@@ -291,7 +294,7 @@ def train(
                 discriminator = discriminator.eval()
 
                 loss_fool_discriminator = step_fool_discriminator(
-                        rec_patches=rec_patches.shallow_copy(), discriminator=discriminator, accelerator=accelerator)['loss']
+                        rec_patches=rec_patches.shallow_copy(), z=out['z'], discriminator=discriminator, accelerator=accelerator)['loss']
                 out['loss_fool_discriminator'] = loss_fool_discriminator
 
                 loss = 0.0
@@ -319,14 +322,14 @@ def train(
                 discriminator = discriminator.train()
 
                 discriminator_res = step_discriminator(
-                        real_patches=normalized_batch.shallow_copy(), rec_patches=rec_patches.shallow_copy(), discriminator=discriminator, accelerator=accelerator)
+                        real_patches=normalized_batch.shallow_copy(), rec_patches=rec_patches.shallow_copy(), z=out['z'], discriminator=discriminator, accelerator=accelerator)
                 loss_discriminator_classification = discriminator_res['loss']
 
                 accelerator.backward(loss_discriminator_classification)
 
                 # optimizer step
                 if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(list(autoencoder.parameters()) + list(discriminator.parameters()), 1.0)
+                    accelerator.clip_grad_norm_(list(autoencoder.parameters()) + list(discriminator.parameters()), 5.0)
                     scheduler.step()
 
                 optimizer.step()
@@ -439,6 +442,7 @@ def main(
             model_config.max_patch_w,
             model_config.image_channels,
             autoencoder.config.patch_size ** 2,
+            condition_dim=model_config.decoder_config.hidden_size,
     )
 
     if autocast_dtype == "no":
@@ -455,11 +459,8 @@ def main(
                 autoencoder.forward,
                 **compile_kwargs
             )
-        autoencoder.entropy_loss = torch.compile(
-                autoencoder.entropy_loss,
-                 **compile_kwargs)
-        discriminator = torch.compile(
-                discriminator,
+        discriminator.forward = torch.compile(
+                discriminator.forward,
                  **compile_kwargs)
 
 
