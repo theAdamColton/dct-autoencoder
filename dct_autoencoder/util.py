@@ -40,6 +40,8 @@ Mipt = torch.Tensor(
 Trgb2lms = MHPE @ MsRGB
 Tlms2rgb = Trgb2lms.inverse()
 
+IPT_GAMMA = 1.0# = 0.43
+
 
 def channel_mult(M, x):
     return einsum(M, x, "i j, ... j h w -> ... i h w")
@@ -72,8 +74,8 @@ def rgb_to_ipt(x: torch.Tensor):
     """
     x = rgb_to_lms(x)
     mask = x >= 0.0
-    x[mask] = x[mask] ** 0.43
-    x[~mask] = -1 * (-1 * x[~mask]) ** 0.43
+    x[mask] = x[mask] ** IPT_GAMMA
+    x[~mask] = -1 * (-1 * x[~mask]) ** IPT_GAMMA
     return channel_mult(
         Mipt.to(x.dtype).to(x.device),
         x,
@@ -90,8 +92,8 @@ def ipt_to_rgb(x: torch.Tensor):
         x,
     )
     mask = x >= 0.0
-    x[mask] = x[mask] ** 2.3256
-    x[~mask] = -1 * (-1 * x[~mask]) ** 2.3256
+    x[mask] = x[mask] ** (1/IPT_GAMMA)
+    x[~mask] = -1 * (-1 * x[~mask]) ** (1/IPT_GAMMA)
     return lms_to_rgb(x)
 
 

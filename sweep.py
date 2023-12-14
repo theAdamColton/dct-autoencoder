@@ -18,16 +18,16 @@ def run_main():
     main(
         preprocessed_dataset_path_or_url= "/hdd/laion2B-p14-0.012-partial-0-2500/00{0000..1386}.tar",
         torch_compile=True,
-        seed=321,
-        num_workers=2,
+        seed=1321314,
+        num_workers=3,
         grad_accumulation_steps=2,
-        batch_size=16,
+        batch_size=8,
         train_norm_iters=0,
         max_iters= 2000,
         log_every=500,
         model_config_path= "./conf/patch14-l.json",
-        model_resume_path="./out/2023-12-12_16-02-31/model/",
-        sample_patches_beta= 0.012,
+        accelerator_resume_path="./out/2023-12-13_09-16-05/accelerator_state/",
+        sample_patches_beta= 0.006,
         should_save=False,
         autocast_dtype='fp16',
         **wandb.config
@@ -35,3 +35,4 @@ def run_main():
 
 sweep_id = wandb.sweep(sweep=sweep_configuration, project="vq-experiments")
 wandb.agent(sweep_id, function=run_main, count=30)
+

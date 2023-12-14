@@ -9,7 +9,7 @@ from tqdm import tqdm
 from PIL import ImageDraw
 
 from dct_autoencoder.factory import get_model_and_processor
-from dct_autoencoder.dataset import dict_collate, tuple_collate
+from dct_autoencoder.dataset import dict_collate
 from dct_autoencoder.util import image_clip
 
 

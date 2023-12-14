@@ -115,7 +115,7 @@ class DCTAutoencoderFeatureExtractor(FeatureExtractionMixin):
         max_seq_len: int,
         channel_importances: Tuple[float, float, float] = (8.0, 1.0, 1.0),
         # how import is the max magnitude of a patch when sampling which patches to drop
-        patch_sample_magnitude_weight: float = 0.5,
+        patch_sample_magnitude_weight: float = 0.1,
     ):
         self.channels = channels
         self.patch_size = patch_size
