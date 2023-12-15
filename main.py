@@ -4,7 +4,7 @@ import torch
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
 from accelerate import Accelerator
-from bitsandbytes.optim import PagedAdamW32bit
+from bitsandbytes.optim import PagedAdamW8bit
 import wandb
 import random
 from transformers.optimization import get_cosine_schedule_with_warmup
@@ -60,12 +60,6 @@ def step_autoencoder(
     # gets the mask, 1s where the sequences wasn't padded
     mask = ~output_patches.key_pad_mask
 
-    # entropy loss
-    if autoencoder.training:
-        entropy_loss = autoencoder.entropy_loss(res['distances'], mask=mask)
-    else:
-        entropy_loss = 0.0
-
 
     # normalized loss
     # l1 is used because dct features are usually considered laplacian distributed
@@ -90,7 +84,6 @@ def step_autoencoder(
         rec_loss_unnormalized=rec_loss_unnormalized,
         perplexity=perplexity,
         commit_loss=res['commit_loss'],
-        entropy_loss=entropy_loss,
     )
 
     if decode_pixels:
@@ -312,7 +305,6 @@ def main(
     rec_loss_unnormalized: float = 1.0,
     rec_loss: float = 0.1,
     commit_loss: float = 0.1,
-    entropy_loss: float = 0.1,
 ):
     model_config: DCTAutoencoderConfig = DCTAutoencoderConfig.from_json_file(
         model_config_path
@@ -326,7 +318,6 @@ def main(
     loss_weight = dict(rec_loss=rec_loss,
                        rec_loss_unnormalized=rec_loss_unnormalized,
                        commit_loss=commit_loss,
-                       entropy_loss=entropy_loss,
                    )
 
     random.seed(seed)
@@ -351,16 +342,17 @@ def main(
 
     if torch_compile:
         # the forward method is patched,
-        compile_kwargs = dict(fullgraph=True, dynamic=True)
-        autoencoder.forward = torch.compile(
-                autoencoder.forward,
-                **compile_kwargs
-            )
-        autoencoder.entropy_loss = torch.compile(
-                autoencoder.entropy_loss,
+        compile_kwargs = dict(fullgraph=True)
+        def _comp(m):
+            m.forward = torch.compile(
+                m.forward,
                 **compile_kwargs
             )
 
+        _comp(autoencoder.encoder)
+        _comp(autoencoder.decoder)
+        _comp(autoencoder.to_patch_embedding)
+        _comp(autoencoder.proj_out)
 
     max_seq_len = processor.max_seq_len
 
@@ -418,7 +410,7 @@ def main(
         print("done training norm")
     autoencoder.patchnorm.frozen = True
 
-    optimizer = PagedAdamW32bit(
+    optimizer = PagedAdamW8bit(
             autoencoder.parameters(),
             lr=learning_rate,
             betas=(0.9, 0.99),

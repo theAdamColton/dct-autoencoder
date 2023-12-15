@@ -8,6 +8,7 @@ from dct_autoencoder.patchnorm import PatchNorm
 from .configuration_dct_autoencoder import DCTAutoencoderConfig
 from .dct_patches import DCTPatches
 from .lfq import LFQ
+from .vector_quantize import VectorQuantize
 from .util import compute_entropy_loss
 
 
@@ -66,11 +67,12 @@ class DCTAutoencoder(PreTrainedModel):
             self.config.encoder_config
         )
 
-        self.vq_model = LFQ(
-            dim=feature_dim,
-            num_codebooks=config.vq_num_codebooks,
-            codebook_size=config.vq_codebook_size,
-        )
+        #self.vq_model = LFQ(
+        #    dim=feature_dim,
+        #    num_codebooks=config.vq_num_codebooks,
+        #    codebook_size=config.vq_codebook_size,
+        #)
+        self.vq_model = VectorQuantize(feature_dim, codebook_size=config.vq_codebook_size, heads=config.vq_num_codebooks, kmeans_init=True, sample_codebook_temp=10.0, codebook_dim=16, learnable_codebook=True, affine_param=True, ema_update=False, threshold_ema_dead_code=10)
 
         self.decoder = CLIPEncoder(
                 self.config.decoder_config
@@ -140,9 +142,9 @@ class DCTAutoencoder(PreTrainedModel):
             dct_patches.patches, attention_mask=dct_patches.attn_mask
         ).last_hidden_state
 
-        dct_patches.patches, codes, commit_loss, distances = self.vq_model(dct_patches.patches, mask=~dct_patches.key_pad_mask)
+        dct_patches.patches, codes, commit_loss = self.vq_model(dct_patches.patches, mask=~dct_patches.key_pad_mask)
 
-        return dct_patches, codes, commit_loss, distances
+        return dct_patches, codes, commit_loss
 
     def decode_from_codes(
             self, codes: torch.LongTensor, do_inv_norm:bool=False, **dct_patches_kwargs
@@ -173,16 +175,12 @@ class DCTAutoencoder(PreTrainedModel):
         dct_patches: DCTPatches,
         do_normalize:bool=False,
     ):
-        dct_patches, codes, commit_loss, distances = self.encode(dct_patches, do_normalize=do_normalize)
+        dct_patches, codes, commit_loss = self.encode(dct_patches, do_normalize=do_normalize)
         dct_patches = self.decode(dct_patches)
 
         return dict(
             dct_patches=dct_patches,
             commit_loss=commit_loss,
             codes=codes,
-            distances=distances,
         )
-
-    def entropy_loss(self, distances: torch.Tensor, mask:torch.BoolTensor):
-        return compute_entropy_loss(distances, mask)
 
