@@ -68,20 +68,22 @@ def load_and_transform_dataset(
                 w = max_size
                 h = int(ar * w)
 
-            rz = transforms.Resize(min(h, w))
+            rz = transforms.Resize(min(h, w), antialias=True)
             pixel_values = rz(pixel_values)
         return pixel_values
 
+    handler = wds.handlers.warn_and_continue
+
     ds = (
-        wds.WebDataset(dataset_url, handler=wds.handlers.warn_and_continue, verbose=True, cache_dir=None, detshuffle=True,)
-        .map_dict(json=json.loads, handler=wds.handlers.warn_and_continue)
+        wds.WebDataset(dataset_url, handler=handler, verbose=True, cache_dir=None, detshuffle=True,)
+        .map_dict(json=json.loads, handler=handler)
         .select(
             filter_res,
         )
-        .decode("torchrgb", partial=True, handler=wds.handlers.warn_and_continue)
-        .rename(pixel_values="jpg", handler=wds.handlers.warn_and_continue)
+        .decode("torchrgb", partial=True, handler=handler)
+        .rename(pixel_values="jpg", handler=handler)
         .map_dict(pixel_values=crop)
-        .map(lambda d: dct_processor.preprocess(d['pixel_values']), handler=wds.handlers.warn_and_continue)
+        .map(lambda d: dct_processor.preprocess(d['pixel_values']), handler=handler)
     )
 
     return ds

@@ -73,9 +73,9 @@ def rgb_to_ipt(x: torch.Tensor):
     https://scholarworks.rit.edu/theses/2858/
     """
     x = rgb_to_lms(x)
-    mask = x >= 0.0
-    x[mask] = x[mask] ** IPT_GAMMA
-    x[~mask] = -1 * (-1 * x[~mask]) ** IPT_GAMMA
+    neg_mask = x < 0.0
+    x = x.abs() ** IPT_GAMMA
+    x[neg_mask] = -1 * x[neg_mask]
     return channel_mult(
         Mipt.to(x.dtype).to(x.device),
         x,
@@ -91,9 +91,9 @@ def ipt_to_rgb(x: torch.Tensor):
         Mipt.inverse().to(x.dtype).to(x.device),
         x,
     )
-    mask = x >= 0.0
-    x[mask] = x[mask] ** (1/IPT_GAMMA)
-    x[~mask] = -1 * (-1 * x[~mask]) ** (1/IPT_GAMMA)
+    neg_mask = x < 0.0
+    x = x.abs() ** (1/IPT_GAMMA)
+    x[neg_mask] = x[neg_mask] * -1
     return lms_to_rgb(x)
 
 
@@ -583,7 +583,7 @@ def make_image_grid(x, x_hat, filename=None, n: int = 10, max_size: int = 1024):
 
     ims = [
         transforms.Resize(
-            384, max_size=max_size, interpolation=transforms.InterpolationMode.BICUBIC
+            384, max_size=max_size, interpolation=transforms.InterpolationMode.BICUBIC, antialias=True
         )(im)
         for im in ims
     ]

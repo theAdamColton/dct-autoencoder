@@ -348,17 +348,6 @@ def main(
     else:
         autoencoder = autoencoder.to(torch.float32)
 
-    if torch_compile:
-        # the forward method is patched,
-        compile_kwargs = dict(fullgraph=True)
-        def _comp(m):
-            m.forward = torch.compile(
-                m.forward,
-                **compile_kwargs
-            )
-        _comp(autoencoder)
-        autoencoder.entropy_loss = torch.compile(autoencoder.entropy_loss, **compile_kwargs)
-
     max_seq_len = processor.max_seq_len
 
     if image_dataset_path_or_url is not None:
@@ -391,7 +380,7 @@ def main(
 
     print("starting run: ", run_d)
     if wandb.run is None:
-        wandb.init(project="vq-experiments", config=run_d)
+        wandb.init(project="dct-ae", config=run_d)
 
     rng = random.Random(seed)
 
@@ -414,6 +403,19 @@ def main(
         processor.sample_patches_beta = sample_patches_beta
         print("done training norm")
     autoencoder.patchnorm.frozen = True
+
+
+    if torch_compile:
+        compile_kwargs = dict(fullgraph=True)
+        def _comp(m):
+            m.forward = torch.compile(
+                m.forward,
+                **compile_kwargs
+            )
+        _comp(autoencoder)
+        _comp(autoencoder.patchnorm)
+        autoencoder.entropy_loss = torch.compile(autoencoder.entropy_loss, **compile_kwargs)
+
 
     optimizer = PagedAdamW8bit(
             autoencoder.parameters(),

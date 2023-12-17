@@ -96,18 +96,17 @@ class PatchNorm(nn.Module):
         pos_w = dct_patches.w_indices
         key_pad_mask = dct_patches.key_pad_mask
 
-        # first masks based on the key_pad_mask
-        # this is important because we don't want the patch statistics effected
-        # by the padding patches, which are all zeros
-        pos_channels = pos_channels[~key_pad_mask]
-        pos_h = pos_h[~key_pad_mask]
-        pos_w = pos_w[~key_pad_mask]
-
         patches_shape = patches.shape
 
-        patches = patches[~key_pad_mask]
-
         if self.training and not self.frozen:
+            # first masks based on the key_pad_mask
+            # this is important because we don't want the patch statistics effected
+            # by the padding patches, which are all zeros
+            pos_channels = pos_channels[~key_pad_mask]
+            pos_h = pos_h[~key_pad_mask]
+            pos_w = pos_w[~key_pad_mask]
+            patches = patches[~key_pad_mask]
+
             with torch.no_grad():
                 # updates n by incrementing all values at pos_channels, pos_h and pos_w
                 batch_n = torch.zeros(
@@ -151,21 +150,19 @@ class PatchNorm(nn.Module):
                 self.n.data = self.n + batch_n
 
 
+                out = torch.zeros(patches_shape, dtype=patches.dtype, device=patches.device)
+                out[~key_pad_mask] = patches
+                return out
+
         medians = self.median[pos_channels, pos_h, pos_w]
-        std = self.std[pos_channels, pos_h, pos_w] + self.eps
+        std = self.b[pos_channels, pos_h, pos_w] * 2**0.5 + self.eps
         n = self.n[pos_channels, pos_h, pos_w]
-        mask = n <= 2
 
         patches = (patches - medians) / std
 
-        patches[mask] = 0.0
-
         patches.clamp_(self.min_val, self.max_val)
 
-        out = torch.zeros(patches_shape, dtype=patches.dtype, device=patches.device)
-        out[~key_pad_mask] = patches
-
-        return out
+        return patches
 
     def inverse_norm(self, dct_patches: DCTPatches) -> torch.Tensor:
         patches = dct_patches.patches
@@ -175,6 +172,6 @@ class PatchNorm(nn.Module):
         pos_w = dct_patches.w_indices
 
         medians = self.median[pos_channels, pos_h, pos_w]
-        std = self.std[pos_channels, pos_h, pos_w] + self.eps
+        std = self.b[pos_channels, pos_h, pos_w] * 2**0.5 + self.eps
 
         return patches * std + medians
