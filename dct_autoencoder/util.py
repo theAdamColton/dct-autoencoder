@@ -40,7 +40,7 @@ Mipt = torch.Tensor(
 Trgb2lms = MHPE @ MsRGB
 Tlms2rgb = Trgb2lms.inverse()
 
-IPT_GAMMA = 1.0# = 0.43
+IPT_GAMMA = 0.43
 
 
 def channel_mult(M, x):

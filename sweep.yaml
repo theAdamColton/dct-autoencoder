@@ -1,0 +1,25 @@
+program: wandb_main.py
+method: bayes
+name: sweep
+metric: 
+  goal: minimize
+  name: train.rec_loss
+parameters:
+  learning_rate: 
+    max: 1e-3
+    min: 5e-5
+    distribution: log_uniform_values
+  rec_loss: 
+    max: 1.0
+    min: 0.1
+  rec_loss_unnormalized: 
+    max: 1.0
+    min: 0.1
+  commit_loss: 
+    min: 1e-3
+    max: 7e-1
+    distribution: log_uniform_values
+  entropy_loss: 
+    min: 1e-4
+    max: 1e1
+    distribution: log_uniform_values

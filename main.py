@@ -60,6 +60,11 @@ def step_autoencoder(
     # gets the mask, 1s where the sequences wasn't padded
     mask = ~output_patches.key_pad_mask
 
+    # entropy loss
+    if autoencoder.training:
+        entropy_loss = autoencoder.entropy_loss(res['distances'], mask=mask)
+    else:
+        entropy_loss = 0.0
 
     # normalized loss
     # l1 is used because dct features are usually considered laplacian distributed
@@ -84,6 +89,7 @@ def step_autoencoder(
         rec_loss_unnormalized=rec_loss_unnormalized,
         perplexity=perplexity,
         commit_loss=res['commit_loss'],
+        entropy_loss=entropy_loss,
     )
 
     if decode_pixels:
@@ -305,6 +311,7 @@ def main(
     rec_loss_unnormalized: float = 1.0,
     rec_loss: float = 0.1,
     commit_loss: float = 0.1,
+    entropy_loss: float = 0.1,
 ):
     model_config: DCTAutoencoderConfig = DCTAutoencoderConfig.from_json_file(
         model_config_path
@@ -318,6 +325,7 @@ def main(
     loss_weight = dict(rec_loss=rec_loss,
                        rec_loss_unnormalized=rec_loss_unnormalized,
                        commit_loss=commit_loss,
+                       entropy_loss=entropy_loss,
                    )
 
     random.seed(seed)
@@ -348,11 +356,8 @@ def main(
                 m.forward,
                 **compile_kwargs
             )
-
-        _comp(autoencoder.encoder)
-        _comp(autoencoder.decoder)
-        _comp(autoencoder.to_patch_embedding)
-        _comp(autoencoder.proj_out)
+        _comp(autoencoder)
+        autoencoder.entropy_loss = torch.compile(autoencoder.entropy_loss, **compile_kwargs)
 
     max_seq_len = processor.max_seq_len
 

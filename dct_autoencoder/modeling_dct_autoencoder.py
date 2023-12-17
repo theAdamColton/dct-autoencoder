@@ -67,12 +67,16 @@ class DCTAutoencoder(PreTrainedModel):
             self.config.encoder_config
         )
 
-        #self.vq_model = LFQ(
-        #    dim=feature_dim,
-        #    num_codebooks=config.vq_num_codebooks,
-        #    codebook_size=config.vq_codebook_size,
-        #)
-        self.vq_model = VectorQuantize(feature_dim, codebook_size=config.vq_codebook_size, heads=config.vq_num_codebooks, kmeans_init=True, sample_codebook_temp=10.0, codebook_dim=16, learnable_codebook=True, affine_param=True, ema_update=False, threshold_ema_dead_code=10)
+        if config.vq_type == 'lfq':
+            self.vq_model = LFQ(
+                dim=feature_dim,
+                num_codebooks=config.vq_num_codebooks,
+                codebook_size=config.vq_codebook_size,
+            )
+        elif config.vq_type == 'vq':
+            self.vq_model = VectorQuantize(feature_dim, codebook_size=config.vq_codebook_size, heads=config.vq_num_codebooks, kmeans_init=True, sample_codebook_temp=20.0, codebook_dim=16, learnable_codebook=True, affine_param=True, ema_update=False, threshold_ema_dead_code=15)
+        else:
+            raise ValueError(config.vq_type)
 
         self.decoder = CLIPEncoder(
                 self.config.decoder_config
@@ -142,9 +146,13 @@ class DCTAutoencoder(PreTrainedModel):
             dct_patches.patches, attention_mask=dct_patches.attn_mask
         ).last_hidden_state
 
-        dct_patches.patches, codes, commit_loss = self.vq_model(dct_patches.patches, mask=~dct_patches.key_pad_mask)
+        if self.config.vq_type == 'vq':
+            dct_patches.patches, codes, commit_loss = self.vq_model(dct_patches.patches, mask=~dct_patches.key_pad_mask)
+            distances = None
+        else:
+            dct_patches.patches, codes, commit_loss, distances = self.vq_model(dct_patches.patches, mask=~dct_patches.key_pad_mask)
 
-        return dct_patches, codes, commit_loss
+        return dct_patches, codes, commit_loss, distances
 
     def decode_from_codes(
             self, codes: torch.LongTensor, do_inv_norm:bool=False, **dct_patches_kwargs
@@ -175,12 +183,18 @@ class DCTAutoencoder(PreTrainedModel):
         dct_patches: DCTPatches,
         do_normalize:bool=False,
     ):
-        dct_patches, codes, commit_loss = self.encode(dct_patches, do_normalize=do_normalize)
+        dct_patches, codes, commit_loss, distances = self.encode(dct_patches, do_normalize=do_normalize)
         dct_patches = self.decode(dct_patches)
 
         return dict(
             dct_patches=dct_patches,
             commit_loss=commit_loss,
             codes=codes,
+            distances=distances,
         )
 
+    def entropy_loss(self, distances: torch.Tensor, mask:torch.BoolTensor):
+        og_dtype = distances.dtype
+        distances = distances.float()
+        entropy_loss = compute_entropy_loss(distances, mask)
+        return entropy_loss.to(og_dtype)
